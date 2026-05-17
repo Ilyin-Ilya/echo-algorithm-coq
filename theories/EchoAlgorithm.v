@@ -104,6 +104,11 @@ Definition send_to_all (src : node) (dsts : list node) (msg : echo_msg)
     The initiator fires first: it moves from Idle to Active and floods
     Token messages to all its neighbors. *)
 
+(** The initiator's one-time startup action.
+    It atomically moves itself from Idle to Active, sets pending = |neighbors|
+    (it must hear back from every neighbor before it can decide), and floods
+    a Token to every neighbor.  No parent is recorded — the initiator is the
+    root of the spanning tree. *)
 Definition initiator_start (gs : echo_state) : echo_state :=
   let init_p := gs.(es_procs) initiator in
   let my_nbrs := nbrs initiator in
@@ -119,8 +124,12 @@ Definition initiator_start (gs : echo_state) : echo_state :=
 (* ------------------------------------------------------------------ *)
 (** ** 7. Per-node message handler *)
 
-(** [handle_msg self gs pkt] processes one received packet and returns
-    the updated global state. *)
+(** Per-node message handler — the core of the algorithm.
+    Five cases, two of which are the interesting ones:
+      Token / Idle   → become Active, set parent, forward Tokens or echo immediately
+      Echo  / Active → decrement pending; if it hits 0, echo parent (or decide if root)
+    The remaining three cases (Token/Active, Echo/Idle, Echo/Decided, Token/Decided)
+    are either duplicate messages or messages that arrive too late and are dropped. *)
 Definition handle_msg (self : node) (gs : echo_state) (pkt : echo_packet)
     : echo_state :=
   let p := gs.(es_procs) self in

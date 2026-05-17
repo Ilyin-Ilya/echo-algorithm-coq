@@ -87,8 +87,13 @@ Section Invariants.
   Definition is_invariant (P : lts_state M -> Prop) : Prop :=
     forall s, reachable M s -> P s.
 
-  (** Inductive proof obligation: prove P on initial states and show it is
-      preserved by every transition.  This is sufficient for [is_invariant]. *)
+  (** The standard inductive invariant proof method.
+      Instead of quantifying over all reachable states (which requires
+      reasoning about arbitrary execution histories), we just need:
+        (1) P holds on every initial state, and
+        (2) every single transition preserves P.
+      The lemma then upgrades these local obligations to a global guarantee
+      over all reachable states via induction on the [reachable] derivation. *)
   Lemma invariant_by_induction (P : lts_state M -> Prop) :
     (forall s, lts_init M s -> P s) ->
     (forall s lbl s', P s -> lts_trans M s lbl s' -> P s') ->

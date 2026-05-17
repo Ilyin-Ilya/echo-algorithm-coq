@@ -192,7 +192,12 @@ Definition valid_packets (gs : EState) : Prop :=
 Definition init_idle_empty (gs : EState) : Prop :=
   (proc_of gs initiator).(ps_phase) = Idle -> gs.(es_msgs) = [].
 
-(** The combined invariant proved by induction. *)
+(** Combined invariant — all four properties must be proved together
+    because they form a closed inductive set: each preservation case
+    needs one or more of the others.  For example, proving valid_packets
+    is preserved by the Token/Idle handler requires adj_sym (from the
+    graph assumptions) plus the fact that the packet arrived along an
+    existing edge (from valid_packets in the pre-state). *)
 Definition INV (gs : EState) : Prop :=
   tree_invariant gs /\ children_are_neighbors gs /\
   valid_packets gs /\ init_idle_empty gs.
@@ -200,6 +205,9 @@ Definition INV (gs : EState) : Prop :=
 (* ================================================================== *)
 (** ** 3. Base case *)
 
+(** Base case: every initial state (all Idle, empty bag) trivially satisfies INV.
+    All parent/children fields are vacuously empty, so every ∀-quantified
+    condition holds without needing any proof work. *)
 Lemma INV_init : forall gs, lts_init ELts gs -> INV gs.
 Proof.
   intros gs [Hproc Hmsgs].
@@ -218,6 +226,12 @@ Qed.
 (* ================================================================== *)
 (** ** 4. Preservation — step_start *)
 
+(** step_start fires exactly once: the initiator moves Idle → Active and
+    sends Tokens to all neighbors.  Key obligations:
+    - parent_is_neighbor: initiator's new parent is None (no case to check);
+      all other nodes unchanged.
+    - init_idle_empty: initiator is now Active, so the hypothesis (Idle)
+      is false — the obligation vacuously holds. *)
 Lemma INV_step_start gs :
     INV gs ->
     ps_phase (gs.(es_procs) initiator) = Idle ->
@@ -302,6 +316,11 @@ Ltac upd_case self n :=
 (* ------------------------------------------------------------------ *)
 (** 5a. Token received by Idle node *)
 
+(** Token received by an Idle node — the main inductive step of the wave.
+    Self goes Idle → Active and sets parent = Some sender.
+    Two subcases depending on whether self is a leaf (pending = 0) or
+    internal (pending > 0); in both cases parent = Some sender, so
+    parent_is_neighbor reduces to adj_sym applied to the incoming edge. *)
 Lemma deliver_token_idle gs self sender body pkt :
     pkt = mkPkt sender self body ->
     ep_body pkt = Token ->
@@ -404,6 +423,11 @@ Qed.
 (* ------------------------------------------------------------------ *)
 (** 5b. Token received by Active node (duplicate — already has parent) *)
 
+(** Token received by an Active node (duplicate delivery).
+    The handler sends a single Echo back but does NOT change any process state,
+    so all parts of INV that concern proc states are immediate from the IH.
+    Only valid_packets needs work: the new Echo travels along adj self sender
+    which equals adj sender self (by adj_sym) = true from the incoming Token. *)
 Lemma deliver_token_active gs self sender pkt :
     ep_src pkt = sender -> ep_dst pkt = self -> ep_body pkt = Token ->
     (proc_of gs self).(ps_phase) = Active ->
@@ -439,6 +463,13 @@ Qed.
 (* ------------------------------------------------------------------ *)
 (** 5c. Echo received by Active node *)
 
+(** Echo received by an Active node — the return wave.
+    Three sub-subcases: pending > 1 (still waiting), pending = 1 with parent
+    (forward Echo to parent, stay Active), and pending = 1 without parent
+    (this is the initiator — decide).  The most delicate case is
+    pending = 1 / parent = None: we must show initiator_no_parent is
+    preserved, which requires ruling out self ≠ initiator by contradiction
+    (if self ≠ initiator and parent = None then Hinop gives a contradiction). *)
 Lemma deliver_echo_active gs self sender pkt :
     ep_src pkt = sender -> ep_dst pkt = self -> ep_body pkt = Echo ->
     (proc_of gs self).(ps_phase) = Active ->
@@ -582,6 +613,12 @@ Qed.
 (* ------------------------------------------------------------------ *)
 (** 5d. Ignored cases: Token/Decided, Echo/Idle, Echo/Decided *)
 
+(** Ignored message cases: Token/Decided, Echo/Idle, Echo/Decided.
+    In all three branches handle_msg returns a state with identical procs
+    and a strictly smaller message bag.  We first prove the state equality,
+    then INV follows directly from the IH since fewer packets in the bag
+    only makes valid_packets easier and init_idle_empty uses Hin to derive
+    a contradiction if the initiator were still Idle. *)
 Lemma deliver_ignored gs self pkt :
     ep_dst pkt = self ->
     (  (ep_body pkt = Token /\ (proc_of gs self).(ps_phase) = Decided)
@@ -623,6 +660,10 @@ Qed.
 (* ================================================================== *)
 (** ** 6. Main step lemma and invariant theorem *)
 
+(** Combines all five per-handler cases into a single step lemma.
+    Destructs on (ep_body pkt, ps_phase (proc_of gs (ep_dst pkt))) to
+    dispatch to the appropriate sub-lemma.  The six cases are:
+    Token/{Idle,Active,Decided} and Echo/{Idle,Active,Decided}. *)
 Lemma INV_step_deliver gs pkt gs' :
     INV gs ->
     In pkt gs.(es_msgs) ->
@@ -656,6 +697,9 @@ Proof.
                              | exact Hinv | exact Hin].
 Qed.
 
+(** Main safety theorem: INV is an invariant of the Echo LTS.
+    Uses [invariant_by_induction]: INV_init covers initial states,
+    INV_step_start / INV_step_deliver cover the two transition kinds. *)
 Theorem INV_holds : is_invariant ELts INV.
 Proof.
   apply invariant_by_induction.
@@ -669,6 +713,9 @@ Qed.
 (* ================================================================== *)
 (** ** 7. Corollaries *)
 
+(** Corollaries: project INV onto each individual property.
+    These are the externally useful results — clients don't need to know
+    about the full INV conjunction. *)
 Theorem tree_invariant_holds : is_invariant ELts tree_invariant.
 Proof.
   intros gs Hr. exact (proj1 (INV_holds gs Hr)).
@@ -687,6 +734,12 @@ Qed.
 (* ================================================================== *)
 (** ** 8. Spanning tree (path to initiator) *)
 
+(** Follow the ps_parent chain for at most k hops.
+    Returns Some m if the chain reaches m in ≤ k steps, None if it runs
+    into a node with no parent before k steps are used.  The bound k is
+    existentially quantified in [reaches_initiator], so the caller need
+    only exhibit a concrete k — typically the depth of n in the token-wave
+    spanning tree. *)
 Fixpoint parent_path (gs : EState) (n : node) (k : nat) : option node :=
   match k with
   | 0   => Some n
@@ -703,6 +756,12 @@ Definition reaches_initiator (gs : EState) (n : node) : Prop :=
 Definition initiator_decided (gs : EState) : Prop :=
   (proc_of gs initiator).(ps_phase) = Decided.
 
+(** A4. When the initiator has decided, every non-initiator node is Active.
+    Intuitively: the initiator decides only after receiving echoes from all
+    neighbors, which in turn echoed only after their subtrees were fully
+    explored.  Proving this formally requires a trace-depth induction
+    (the Token wave reaches depth d before depth d+1) plus reliable_delivery
+    to guarantee no packet is stranded.  We axiomatize it here. *)
 (** A4. When the initiator has decided, every non-initiator node is Active.
     Derivable from reliable_delivery + token wave propagation, but we
     take it as an axiom to keep the proof modular. *)
@@ -724,6 +783,13 @@ Variable active_non_init_has_chain :
       n <> initiator ->
       reaches_initiator gs n.
 
+(** Main liveness theorem: when the initiator decides, the spanning tree
+    is complete — every node in the network has a chain of ps_parent
+    pointers leading back to the initiator.
+
+    Proof outline:
+    - n = initiator: trivial (depth-0 path).
+    - n ≠ initiator: A4 says n is Active; A5 gives the parent chain. *)
 Theorem decided_reaches_initiator :
   forall gs,
     reachable ELts gs ->
@@ -743,6 +809,12 @@ Qed.
 (* ================================================================== *)
 (** ** 9. Termination measure *)
 
+(** Termination measure: number of Idle nodes remaining.
+    Every execution step either fires step_start (which decreases idle_count
+    by 1, proved in start_decreases_idle) or delivers a packet (which either
+    wakes an Idle node, also decreasing the count, or processes an already
+    Active/Decided node, never increasing it).  So the execution must
+    terminate in at most |all_nodes| steps for the wave to fully propagate. *)
 Definition idle_count (gs : EState) : nat :=
   length (filter (fun n => match (proc_of gs n).(ps_phase) with
                            | Idle => true | _ => false end) all_nodes).
@@ -750,6 +822,10 @@ Definition idle_count (gs : EState) : nat :=
 (** Helper: if in a NoDup list [x] satisfies [f x = true] but [f' x = false],
     and all other elements agree ([forall y, y <> x -> f' y = f y]),
     then [length (filter f' l) < length (filter f l)]. *)
+(** Key list lemma: flipping one element from true to false strictly shrinks
+    the filtered list.  NoDup ensures x appears exactly once so the length
+    decreases by exactly 1 rather than possibly more.  The Nat.succ_lt_mono
+    step requires proj1 (not apply) because succ_lt_mono is an iff. *)
 Lemma filter_length_flip {A} (x : A) (f f' : A -> bool) :
     forall l : list A,
     NoDup l -> In x l ->
@@ -794,6 +870,12 @@ Qed.
 
 (** Requires [initiator ∈ all_nodes] and [NoDup all_nodes] to prove the
     count strictly decreases.  Left admitted; the algorithm logic is clear. *)
+(** step_start strictly decreases idle_count: the initiator leaves Idle,
+    and no other node changes phase.  Uses filter_length_flip with x =
+    initiator, f = Idle-indicator in old state, f' = same in new state.
+    upd_self / proc_of_upd drive the update_proc reduction instead of
+    rewrite upd_self, which fails when es_procs (mkEchoState ...) is not
+    reduced by cbn. *)
 Lemma start_decreases_idle gs :
     (proc_of gs initiator).(ps_phase) = Idle ->
     idle_count (initiator_start node_eq initiator all_nodes adj gs)
