@@ -18,9 +18,9 @@ Variable adj_sym    : forall n m, adj n m = true -> adj m n = true.
 Variable adj_irrefl : forall n,   adj n n = false.
 
 (* ------------------------------------------------------------------ *)
-(** ** New structural assumptions
-    These three assumptions are required to complete the remaining
-    [Admitted] goals (decided_reaches_initiator, start_decreases_idle). *)
+(** ** Structural assumptions
+    These assumptions are required by the proofs of
+    decided_reaches_initiator and start_decreases_idle. *)
 
 (** A1. Graph connectivity.
     Every node in [all_nodes] has a directed path to [initiator] through
@@ -660,7 +660,7 @@ Qed.
 (* ================================================================== *)
 (** ** 6. Main step lemma and invariant theorem *)
 
-(** Combines all five per-handler cases into a single step lemma.
+(** Combines all four per-handler sub-lemmas into a single step lemma.
     Destructs on (ep_body pkt, ps_phase (proc_of gs (ep_dst pkt))) to
     dispatch to the appropriate sub-lemma.  The six cases are:
     Token/{Idle,Active,Decided} and Echo/{Idle,Active,Decided}. *)
@@ -868,8 +868,6 @@ Proof.
       * exact k.
 Qed.
 
-(** Requires [initiator ∈ all_nodes] and [NoDup all_nodes] to prove the
-    count strictly decreases.  Left admitted; the algorithm logic is clear. *)
 (** step_start strictly decreases idle_count: the initiator leaves Idle,
     and no other node changes phase.  Uses filter_length_flip with x =
     initiator, f = Idle-indicator in old state, f' = same in new state.

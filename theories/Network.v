@@ -68,9 +68,7 @@ Section NetworkModel.
     | hd :: tl =>
         match nt_node_eq NT with
         | {| dec_eq := deq |} =>
-          (* structural comparison on src/dst; body compared by caller *)
-          (* We use a boolean flag passed in to avoid needing DecEq on msg *)
-          hd :: remove_packet pkt tl   (* simplified: caller does filtering *)
+            hd :: remove_packet pkt tl   (* stub: no comparison — caller handles filtering *)
         end
     end.
 

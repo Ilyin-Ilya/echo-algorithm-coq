@@ -9,3 +9,6 @@ theories/.*.aux
 Makefile.coq
 Makefile.coq.conf
 .Makefile.coq.d
+
+# Local session notes
+FINDINGS.md

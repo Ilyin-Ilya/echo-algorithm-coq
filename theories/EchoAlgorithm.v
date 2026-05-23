@@ -52,7 +52,7 @@ Inductive echo_msg : Type :=
 
 Inductive phase : Type :=
   | Idle    : phase   (* has not yet seen a Token          *)
-  | Active  : phase   (* has forwarded tokens; awaiting echoes *)
+  | Active  : phase   (* has received a Token; awaiting echoes from children (leaf nodes echo immediately) *)
   | Decided : phase.  (* initiator only: all echoes received *)
 
 Record proc_state : Type := mkProc {
@@ -125,10 +125,10 @@ Definition initiator_start (gs : echo_state) : echo_state :=
 (** ** 7. Per-node message handler *)
 
 (** Per-node message handler — the core of the algorithm.
-    Five cases, two of which are the interesting ones:
+    Six cases, two of which are the interesting ones:
       Token / Idle   → become Active, set parent, forward Tokens or echo immediately
       Echo  / Active → decrement pending; if it hits 0, echo parent (or decide if root)
-    The remaining three cases (Token/Active, Echo/Idle, Echo/Decided, Token/Decided)
+    The remaining four cases (Token/Active, Echo/Idle, Echo/Decided, Token/Decided)
     are either duplicate messages or messages that arrive too late and are dropped. *)
 Definition handle_msg (self : node) (gs : echo_state) (pkt : echo_packet)
     : echo_state :=
@@ -160,7 +160,7 @@ Definition handle_msg (self : node) (gs : echo_state) (pkt : echo_packet)
           (gs.(es_msgs) ++ out)
 
   (* ---- Token received by an already-Active node (duplicate) ---------- *)
-  (* Non-initiators: send Echo back immediately since we already have a parent. *)
+  (* Already-active node receives a duplicate Token: send Echo back to sender. *)
   | Token, Active =>
       let sender := ep_src pkt in
       let out    := [mkPkt self sender Echo] in
