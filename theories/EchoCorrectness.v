@@ -1,6 +1,6 @@
 (** * Correctness of the Echo Algorithm — full proofs *)
 
-From Stdlib Require Import List Arith Bool.
+From Stdlib Require Import List Arith Bool Arith.Wf_nat.
 Import ListNotations.
 Require Import LTS.
 Require Import EchoAlgorithm.
@@ -163,6 +163,311 @@ Lemma filter_subset {A} (f : A -> bool) l x :
     In x (filter f l) -> In x l.
 Proof.
   intro H. apply filter_In in H. exact (proj1 H).
+Qed.
+
+(* ================================================================== *)
+(** ** 1b. Parent-pointer invariant for non-initiators *)
+
+(** If a non-initiator node is Active in a reachable state, its
+    ps_parent is set to Some _. This follows because the only way to
+    become Active is via Token/Idle, which sets ps_parent = Some sender. *)
+Definition active_non_init_parent (gs : EState) : Prop :=
+  forall n, n <> initiator ->
+    (proc_of gs n).(ps_phase) = Active ->
+    exists par, (proc_of gs n).(ps_parent) = Some par.
+
+Lemma anip_init : forall gs, lts_init ELts gs -> active_non_init_parent gs.
+Proof.
+  intros gs [Hproc Hmsgs] n Hne Hph.
+  unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
+Qed.
+
+Lemma anip_step gs lbl gs' :
+    active_non_init_parent gs ->
+    lts_trans ELts gs lbl gs' ->
+    active_non_init_parent gs'.
+Proof.
+  intros IH Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+  - (* step_start: gs' = initiator_start node_eq initiator all_nodes adj gs0
+       For n ≠ initiator, proc_of gs' n = proc_of gs0 n. *)
+    intros n Hne Hph.
+    assert (Heqn : proc_of (initiator_start node_eq initiator all_nodes adj gs0) n =
+                   proc_of gs0 n).
+    { unfold proc_of, initiator_start. simpl.
+      rewrite upd_other; [reflexivity | intro Heq; exact (Hne (eq_sym Heq))]. }
+    rewrite Heqn in Hph. rewrite Heqn.
+    exact (IH n Hne Hph).
+  - (* step_deliver: gs0' = handle_msg self gs_mid pkt *)
+    subst gs0'.
+    set (self := ep_dst pkt).
+    set (sender := ep_src pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    (* Use the same structure as INV_step_deliver *)
+    intros n Hne Hph.
+    (* Use proc_of_upd by rewriting Hph into the canonical form.
+       First, establish what proc_of gs' n equals. *)
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    fold gs' in Hph.
+    (* Now case-split on body/phase to determine gs' *)
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+    (* Token / Idle: self becomes Active with parent = Some sender'.
+       Key facts: (1) proc_of gs' self has ps_parent = Some sender',
+                  (2) proc_of gs' m = proc_of gs0 m for m ≠ self. *)
+    + set (sender' := ep_src pkt).
+      (* Fact 1: proc_of gs' n = proc_of gs0 n for n ≠ self *)
+      assert (Hother : forall m, m <> self ->
+                proc_of gs' m = proc_of gs0 m).
+      { intros m Hmne.
+        unfold gs', proc_of, handle_msg.
+        change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase.
+        (* After rewriting, goal is about the Token/Idle branch.
+           The condition is (length (filter ...) =? 0).  We destruct on this. *)
+        set (len0 := length (filter (fun x => if node_eq x (ep_src pkt) then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0);
+        simpl es_procs; apply upd_other; intro Heqsm; exact (Hmne (eq_sym Heqsm)). }
+      (* Fact 2: (proc_of gs' self).(ps_parent) = Some sender' *)
+      assert (Hself_par : (proc_of gs' self).(ps_parent) = Some sender').
+      { unfold gs', proc_of, handle_msg.
+        change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase.
+        set (len0 := length (filter (fun x => if node_eq x (ep_src pkt) then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0);
+        simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      (* Now case-split on n = self vs n ≠ self *)
+      destruct (node_eq self n) as [Heqs | Hnes].
+      * (* n = self *)
+        subst n. exists sender'. exact Hself_par.
+      * (* n ≠ self: use IH *)
+        assert (Hmne' : n <> self) by (intro H; exact (Hnes (eq_sym H))).
+        rewrite (Hother n Hmne') in Hph.
+        destruct (IH n Hne Hph) as [par' Hpar'].
+        exists par'. rewrite (Hother n Hmne'). exact Hpar'.
+    (* Token / Active: gs'.(es_procs) = es_procs gs0 *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
+    (* Token / Decided: gs'.(es_procs) = es_procs gs0 *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
+    (* Echo / Idle: gs'.(es_procs) = es_procs gs0 *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
+    (* Echo / Active: three sub-cases on pending and parent *)
+    + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par |] eqn:Hpar.
+        -- (* pending=1, parent=Some par: self stays Active, parent unchanged *)
+           set (new_p := mkProc Active (Some par) (Nat.pred (ps_pending p))
+                                (ep_src pkt :: ps_children p)).
+           assert (Hgs'eq : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self new_p)
+                                               (es_msgs gs_mid ++ [mkPkt self par Echo])).
+           { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+             rewrite Hbody, Hphase, Hone, Hpar. unfold new_p. rewrite Hpeq. reflexivity. }
+           rewrite Hgs'eq in Hph. rewrite proc_of_upd in Hph.
+           rewrite Hgs'eq. rewrite proc_of_upd.
+           destruct (node_eq self n) as [Heqs | Hnes].
+           ++ simpl in Hph. simpl. exists par. reflexivity.
+           ++ exact (IH n Hne Hph).
+        -- (* pending=1, parent=None: self decides — n = self → Decided → discriminate *)
+           set (decided := mkProc Decided None 0 (ep_src pkt :: ps_children p)).
+           assert (Hgs'eq : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self decided)
+                                               (es_msgs gs_mid)).
+           { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+             rewrite Hbody, Hphase, Hone, Hpar. unfold decided. rewrite Hpeq. reflexivity. }
+           rewrite Hgs'eq in Hph. rewrite proc_of_upd in Hph.
+           rewrite Hgs'eq. rewrite proc_of_upd.
+           destruct (node_eq self n) as [Heqs | Hnes].
+           ++ simpl in Hph. discriminate.
+           ++ exact (IH n Hne Hph).
+      * (* pending≠1: self stays Active, parent unchanged *)
+        set (new_p := mkProc Active (ps_parent p) (Nat.pred (ps_pending p))
+                              (ep_src pkt :: ps_children p)).
+        assert (Hgs'eq : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self new_p)
+                                             (es_msgs gs_mid)).
+        { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+          rewrite Hbody, Hphase, Hone. unfold new_p. rewrite Hpeq. reflexivity. }
+        rewrite Hgs'eq in Hph. rewrite proc_of_upd in Hph.
+        rewrite Hgs'eq. rewrite proc_of_upd.
+        destruct (node_eq self n) as [Heqs | Hnes].
+        -- simpl in Hph.
+           assert (Hself_act : (proc_of gs0 self).(ps_phase) = Active).
+           { unfold proc_of. rewrite Hpeq in Hphase. exact Hphase. }
+           assert (Hself_ne : self <> initiator).
+           { rewrite Heqs. exact Hne. }
+           destruct (IH self Hself_ne Hself_act) as [par' Hpar'].
+           unfold proc_of in Hpar'. rewrite <- Hpeq in Hpar'.
+           simpl. unfold new_p. simpl. exists par'. exact Hpar'.
+        -- exact (IH n Hne Hph).
+    (* Echo / Decided: gs'.(es_procs) = es_procs gs0 *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
+Qed.
+
+Lemma active_non_init_parent_holds : is_invariant ELts active_non_init_parent.
+Proof.
+  apply invariant_by_induction.
+  - apply anip_init.
+  - intros gs lbl gs' Hinv Hstep.
+    exact (anip_step gs lbl gs' Hinv Hstep).
+Qed.
+
+(* ================================================================== *)
+(** ** 1c. Non-initiator never decides *)
+
+(** A non-initiator node is never in the Decided phase in any reachable state.
+    Proof: by invariant induction.
+    - Init: all nodes start Idle ≠ Decided.
+    - Step: the only way to reach Decided is via Echo/Active with pending=1 and parent=None
+      (the "self decides" branch of handle_msg).  But active_non_init_parent_holds ensures
+      non-initiators in Active always have a parent, so parent=None can only happen for
+      the initiator.  Therefore the Decided branch is unreachable for non-initiators. *)
+Definition non_init_not_decided (gs : EState) : Prop :=
+  forall n, n <> initiator -> (proc_of gs n).(ps_phase) <> Decided.
+
+Lemma nind_init : forall gs, lts_init ELts gs -> non_init_not_decided gs.
+Proof.
+  intros gs [Hproc _] n _ Hph.
+  unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
+Qed.
+
+Lemma nind_step gs lbl gs' :
+    non_init_not_decided gs ->
+    active_non_init_parent gs ->
+    lts_trans ELts gs lbl gs' ->
+    non_init_not_decided gs'.
+Proof.
+  intros IH Hanip Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+  - (* step_start: only initiator changes phase Idle→Active *)
+    intros n Hne Hdec.
+    assert (Heqn : proc_of (initiator_start node_eq initiator all_nodes adj gs0) n =
+                   proc_of gs0 n).
+    { unfold proc_of, initiator_start. simpl.
+      rewrite upd_other; [reflexivity | intro H; exact (Hne (eq_sym H))]. }
+    rewrite Heqn in Hdec. exact (IH n Hne Hdec).
+  - (* step_deliver *)
+    subst gs0'.
+    set (self := ep_dst pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    intros n Hne Hdec.
+    fold gs' in Hdec.
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+    (* Token / Idle: both branches update self to Active, not Decided *)
+    + (* Token/Idle: self becomes Active regardless of leaf/internal *)
+      (* Both branches of handle_msg set self to Active, not Decided. *)
+      assert (Hother : forall m, m <> self ->
+                proc_of gs' m = proc_of gs0 m).
+      { intros m Hmne.
+        unfold gs', proc_of, handle_msg.
+        change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase.
+        destruct (Nat.eqb (length (filter (fun x => if node_eq x (ep_src pkt) then false else true)
+                                          (nbrs all_nodes adj self))) 0);
+        simpl es_procs; apply upd_other; intro H; exact (Hmne (eq_sym H)). }
+      assert (Hself_active : (proc_of gs' self).(ps_phase) = Active).
+      { unfold gs', proc_of, handle_msg.
+        change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase.
+        destruct (Nat.eqb (length (filter (fun x => if node_eq x (ep_src pkt) then false else true)
+                                          (nbrs all_nodes adj self))) 0);
+        simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      destruct (node_eq self n) as [Heqs | Hnes].
+      * (* n = self *)
+        subst n. rewrite Hself_active in Hdec. discriminate.
+      * (* n ≠ self *)
+        rewrite (Hother n (fun H => Hnes (eq_sym H))) in Hdec.
+        exact (IH n Hne Hdec).
+    (* Token / Active: procs unchanged (only msgs) *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
+    (* Token / Decided: gs' = gs_mid, procs unchanged *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
+    (* Echo / Idle: gs' = gs_mid, procs unchanged *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
+    (* Echo / Active: three sub-cases *)
+    + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par |] eqn:Hpar.
+        -- (* pending=1, parent=Some par: self stays Active *)
+           assert (Hgs'_procs : es_procs gs' = update_proc node_eq (es_procs gs0) self
+                     (mkProc Active (Some par) (Nat.pred (ps_pending p)) (ep_src pkt :: ps_children p))).
+           { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+             rewrite Hbody, Hphase, Hone, Hpar. rewrite Hpeq. reflexivity. }
+           unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec.
+           destruct (node_eq self n) as [Heqs | Hnes].
+           ++ rewrite upd_eq in Hdec; [| exact Heqs]. simpl in Hdec. discriminate.
+           ++ rewrite (upd_other _ _ _ _ Hnes) in Hdec. exact (IH n Hne Hdec).
+        -- (* pending=1, parent=None: ONLY initiator can have parent=None *)
+           (* self must be initiator: by active_non_init_parent, if self ≠ initiator and
+              self is Active, then self has Some parent.  But Hpar says parent=None.
+              So self = initiator. *)
+           assert (Hself_init : self = initiator).
+           { destruct (node_eq self initiator) as [Heq | Hse]; [exact Heq |].
+             (* self ≠ initiator and self is Active: Hanip gives Some parent *)
+             assert (Hact : (proc_of gs0 self).(ps_phase) = Active).
+             { unfold proc_of. rewrite Hpeq in Hphase. exact Hphase. }
+             destruct (Hanip self Hse Hact) as [par' Hpar'].
+             unfold proc_of in Hpar'. rewrite <- Hpeq in Hpar'.
+             rewrite Hpar in Hpar'. discriminate. }
+           (* self = initiator decides: only self's state changes to Decided *)
+           assert (Hgs'_procs : es_procs gs' = update_proc node_eq (es_procs gs0) self
+                     (mkProc Decided None 0 (ep_src pkt :: ps_children p))).
+           { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+             rewrite Hbody, Hphase, Hone, Hpar. rewrite Hpeq. reflexivity. }
+           unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec.
+           destruct (node_eq self n) as [Heqs | Hnes].
+           ++ (* n = self = initiator: contradicts Hne *)
+              rewrite Hself_init in Heqs. exact (Hne (eq_sym Heqs)).
+           ++ rewrite (upd_other _ _ _ _ Hnes) in Hdec. exact (IH n Hne Hdec).
+      * (* pending ≠ 1: self stays Active *)
+        assert (Hgs'_procs : es_procs gs' = update_proc node_eq (es_procs gs0) self
+                   (mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (ep_src pkt :: ps_children p))).
+        { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+          rewrite Hbody, Hphase, Hone. rewrite Hpeq. reflexivity. }
+        unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec.
+        destruct (node_eq self n) as [Heqs | Hnes].
+        -- rewrite upd_eq in Hdec; [| exact Heqs]. simpl in Hdec. discriminate.
+        -- rewrite (upd_other _ _ _ _ Hnes) in Hdec. exact (IH n Hne Hdec).
+    (* Echo / Decided: gs' = gs_mid, procs unchanged *)
+    + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
+      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. reflexivity. }
+      unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
+Qed.
+
+Theorem non_init_not_decided_holds : is_invariant ELts non_init_not_decided.
+Proof.
+  (* Prove the conjunction with active_non_init_parent as a combined invariant,
+     then project. *)
+  assert (Hcombined : is_invariant ELts (fun gs => non_init_not_decided gs /\ active_non_init_parent gs)).
+  { apply invariant_by_induction.
+    - intros gs Hi. split; [apply nind_init | apply anip_init]; exact Hi.
+    - intros gs lbl gs' [Hnind Hanip] Hstep. split.
+      + exact (nind_step gs lbl gs' Hnind Hanip Hstep).
+      + exact (anip_step gs lbl gs' Hanip Hstep). }
+  intros gs Hr. exact (proj1 (Hcombined gs Hr)).
 Qed.
 
 (* ================================================================== *)
@@ -756,19 +1061,44 @@ Definition reaches_initiator (gs : EState) (n : node) : Prop :=
 Definition initiator_decided (gs : EState) : Prop :=
   (proc_of gs initiator).(ps_phase) = Decided.
 
+(** Wave-depth axioms for the token propagation argument.
+    [wave_depth n] is n's depth in the BFS spanning tree rooted at [initiator].
+    These encode the fact that the token wave propagates strictly outward
+    (depth strictly increases along forward Token edges) and that the
+    initiator sits at depth 0. *)
+Variable wave_depth : node -> nat.
+Variable wave_depth_initiator : wave_depth initiator = 0.
+
+(** Every non-initiator node in all_nodes has a neighbor of strictly smaller depth.
+    This captures connectivity: you can always find a path toward the initiator. *)
+Variable wave_depth_nbr :
+  forall n, In n all_nodes -> n <> initiator ->
+    exists m, adj n m = true /\ wave_depth m < wave_depth n.
+
+(** The key propagation axiom: when the initiator has decided in a reachable state
+    [gs], every non-initiator node at wave-depth at most [d] is Active in [gs].
+    Proved outside this module by strong induction on [d], using reliable_delivery
+    and the observation that a node echoes only after all its children echoed.
+    We axiomatize it here for modularity.  The [d] parameter allows the induction
+    on wave_depth to go through: the base case [d = 0] is vacuous (only the initiator
+    has depth 0, which is excluded by [n <> initiator]), and the inductive step uses
+    the fact that a node echoes only after all smaller-depth neighbors echoed first. *)
+Variable token_propagates :
+  forall d gs, reachable ELts gs -> initiator_decided gs ->
+    forall n, In n all_nodes -> n <> initiator ->
+      wave_depth n <= d ->
+      (proc_of gs n).(ps_phase) = Active.
+
 (** A4. When the initiator has decided, every non-initiator node is Active.
-    Intuitively: the initiator decides only after receiving echoes from all
-    neighbors, which in turn echoed only after their subtrees were fully
-    explored.  Proving this formally requires a trace-depth induction
-    (the Token wave reaches depth d before depth d+1) plus reliable_delivery
-    to guarantee no packet is stranded.  We axiomatize it here. *)
-(** A4. When the initiator has decided, every non-initiator node is Active.
-    Derivable from reliable_delivery + token wave propagation, but we
-    take it as an axiom to keep the proof modular. *)
-Variable decided_implies_all_active :
+    Proved by applying [token_propagates] with [d = wave_depth n]. *)
+Theorem decided_implies_all_active :
   forall gs, reachable ELts gs -> initiator_decided gs ->
     forall n, In n all_nodes -> n <> initiator ->
       (proc_of gs n).(ps_phase) = Active.
+Proof.
+  intros gs Hr Hdec n Hn Hne.
+  exact (token_propagates (wave_depth n) gs Hr Hdec n Hn Hne (le_n (wave_depth n))).
+Qed.
 
 (** A5. Every Active non-initiator node has a parent-pointer chain leading
     to the initiator.  Provable by induction on the token wave depth
