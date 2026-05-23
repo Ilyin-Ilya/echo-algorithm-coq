@@ -1,6 +1,6 @@
 (** * Correctness of the Echo Algorithm — full proofs *)
 
-From Stdlib Require Import List Arith Bool Arith.Wf_nat.
+From Stdlib Require Import List Arith Bool Arith.Wf_nat Init.Wf Wellfounded.Inverse_Image.
 Import ListNotations.
 Require Import LTS.
 Require Import EchoAlgorithm.
@@ -1073,31 +1073,55 @@ Variable wave_depth_initiator : wave_depth initiator = 0.
     This captures connectivity: you can always find a path toward the initiator. *)
 Variable wave_depth_nbr :
   forall n, In n all_nodes -> n <> initiator ->
-    exists m, adj n m = true /\ wave_depth m < wave_depth n.
+    exists m, In m all_nodes /\ adj n m = true /\ wave_depth m < wave_depth n.
 
-(** The key propagation axiom: when the initiator has decided in a reachable state
-    [gs], every non-initiator node at wave-depth at most [d] is Active in [gs].
-    Proved outside this module by strong induction on [d], using reliable_delivery
-    and the observation that a node echoes only after all its children echoed.
-    We axiomatize it here for modularity.  The [d] parameter allows the induction
-    on wave_depth to go through: the base case [d = 0] is vacuous (only the initiator
-    has depth 0, which is excluded by [n <> initiator]), and the inductive step uses
-    the fact that a node echoes only after all smaller-depth neighbors echoed first. *)
-Variable token_propagates :
-  forall d gs, reachable ELts gs -> initiator_decided gs ->
-    forall n, In n all_nodes -> n <> initiator ->
-      wave_depth n <= d ->
+(** The one-hop causal fact: in a reachable decided state, if m is not Idle,
+    m is adjacent to n, and m has strictly smaller wave depth than n, then
+    n is Active.  Proof sketch: when m became Active it sent a Token to n
+    (n is not m's parent since wave_depth n > wave_depth m), reliable_delivery
+    guaranteed the Token was delivered before the initiator could decide, so
+    n became Active and (by phase monotonicity) is still Active in gs.
+    Formalizing the trace-ordering argument requires a reachable_from relation
+    not yet built; we axiomatize this one-hop fact. *)
+Variable one_hop_active :
+  forall gs, reachable ELts gs -> initiator_decided gs ->
+    forall m n, In m all_nodes -> In n all_nodes ->
+      adj m n = true ->
+      wave_depth m < wave_depth n ->
+      (proc_of gs m).(ps_phase) <> Idle ->
       (proc_of gs n).(ps_phase) = Active.
 
-(** A4. When the initiator has decided, every non-initiator node is Active.
-    Proved by applying [token_propagates] with [d = wave_depth n]. *)
+(** decided_implies_all_active: proved by well-founded induction on wave_depth,
+    using wf_inverse_image (Coq.Init.Wf) to lift lt_wf from nat to node.
+    At each depth d, the inductive hypothesis gives that all non-initiator nodes
+    at depth < d are Active; one_hop_active then handles the d → d+1 step. *)
 Theorem decided_implies_all_active :
   forall gs, reachable ELts gs -> initiator_decided gs ->
     forall n, In n all_nodes -> n <> initiator ->
       (proc_of gs n).(ps_phase) = Active.
 Proof.
-  intros gs Hr Hdec n Hn Hne.
-  exact (token_propagates (wave_depth n) gs Hr Hdec n Hn Hne (le_n (wave_depth n))).
+  intros gs Hr Hdec.
+  apply (well_founded_ind
+           (wf_inverse_image node nat lt wave_depth lt_wf)
+           (fun n => In n all_nodes -> n <> initiator ->
+                     (proc_of gs n).(ps_phase) = Active)).
+  intros n IH Hn Hne.
+  (* n is not Decided *)
+  assert (Hndec : (proc_of gs n).(ps_phase) <> Decided)
+    by exact (non_init_not_decided_holds gs Hr n Hne).
+  (* Get a neighbor m with strictly smaller wave depth *)
+  destruct (wave_depth_nbr n Hn Hne) as [m [Hmin [Hadj Hlt]]].
+  (* m is not Idle *)
+  assert (Hm_not_idle : (proc_of gs m).(ps_phase) <> Idle).
+  { destruct (node_eq m initiator) as [-> | Hmne].
+    - (* initiator is Decided, not Idle *)
+      intro Heq. unfold initiator_decided in Hdec.
+      rewrite Heq in Hdec. discriminate.
+    - (* m ≠ initiator: by IH (wave_depth m < wave_depth n), m is Active *)
+      intro Heq. rewrite (IH m Hlt Hmin Hmne) in Heq. discriminate. }
+  (* By one_hop_active: n is Active.
+     wave_depth_nbr gives adj n m; adj_sym gives adj m n. *)
+  exact (one_hop_active gs Hr Hdec m n Hmin Hn (adj_sym n m Hadj) Hlt Hm_not_idle).
 Qed.
 
 (** A5. Every Active non-initiator node has a parent-pointer chain leading
