@@ -28,10 +28,15 @@ Require Import EchoAlgorithm.
 
 Section EchoCorrectness.
 
+(** Abstract node type — the proof is generic over any type with decidable equality. *)
 Variable node      : Type.
+(** Decidable equality on nodes, needed for update_proc and remove_pkt. *)
 Variable node_eq   : forall (n m : node), {n = m} + {n <> m}.
+(** The unique initiator: the node that fires step_start and eventually decides. *)
 Variable initiator : node.
+(** A finite enumeration of all nodes, used for pending counts and idle_count. *)
 Variable all_nodes : list node.
+(** Symmetric adjacency relation; [adj u v = true] iff there is an edge u-v. *)
 Variable adj       : node -> node -> bool.
 
 (** Graph assumptions required for correctness. *)
@@ -50,9 +55,12 @@ Variable nodup_nodes        : NoDup all_nodes.
     Idle set (it becomes Active after step_start) strictly decreases the
     count. *)
 
+(** Shorthand for the echo LTS instantiated with the given parameters. *)
 Let ELts   := echo_LTS node node_eq initiator all_nodes adj.
+(** Shorthand for the type of global states. *)
 Let EState := @echo_state node.
 
+(** Shorthand: look up node [n]'s local state in global state [gs]. *)
 Definition proc_of (gs : EState) (n : node) : @proc_state node :=
   gs.(es_procs) n.
 
@@ -66,7 +74,10 @@ Definition proc_of (gs : EState) (n : node) : @proc_state node :=
     that all later invariants build on. *)
 (* ================================================================== *)
 
-(** update_proc: reading back the written slot vs any other slot. *)
+(* ------------------------------------------------------------------ *)
+(** Lemmas about [update_proc]: reading back the written slot vs any other slot. *)
+
+(** Reading the slot that was just written returns the new value. *)
 Lemma upd_self (f : node -> @proc_state node) n s :
     update_proc node_eq f n s n = s.
 Proof.
@@ -74,6 +85,7 @@ Proof.
   destruct (node_eq n n) as [_ | Hc]; [reflexivity | exact (False_ind _ (Hc eq_refl))].
 Qed.
 
+(** Reading any slot OTHER than the one written falls through to the old function. *)
 Lemma upd_other (f : node -> @proc_state node) n s m :
     n <> m -> update_proc node_eq f n s m = f m.
 Proof.
@@ -81,6 +93,7 @@ Proof.
   destruct (node_eq n m) as [Heq | _]; [exact (False_ind _ (Hne Heq)) | reflexivity].
 Qed.
 
+(** Corollary of [upd_self] with an equality hypothesis instead of [eq_refl]. *)
 Lemma upd_eq (f : node -> @proc_state node) n m s :
     n = m -> update_proc node_eq f n s m = s.
 Proof. intros ->; apply upd_self. Qed.
@@ -145,6 +158,48 @@ Proof.
   intro H. apply filter_In in H. exact (proj1 H).
 Qed.
 
+(** handle_msg leaves es_procs unchanged in the four "ignored" cases:
+    Token/Active, Token/Decided, Echo/Idle, Echo/Decided. *)
+Lemma handle_msg_procs_noop (self : node) (gs : EState) (pkt : @echo_packet node) :
+    ((ep_body pkt = Token /\ ps_phase (gs.(es_procs) self) = Active) \/
+     (ep_body pkt = Token /\ ps_phase (gs.(es_procs) self) = Decided) \/
+     (ep_body pkt = Echo  /\ ps_phase (gs.(es_procs) self) = Decided) \/
+     (ep_body pkt = Echo  /\ ps_phase (gs.(es_procs) self) = Idle)) ->
+    (handle_msg node_eq all_nodes adj self gs pkt).(es_procs) = gs.(es_procs).
+Proof.
+  intros [[Hb Hph]|[[Hb Hph]|[[Hb Hph]|[Hb Hph]]]];
+  unfold handle_msg; cbn zeta; rewrite Hb, Hph; reflexivity.
+Qed.
+
+(** Dispatch: extract s/g/p from the goal, pick the matching disjunct. *)
+Ltac noop_procs_tac :=
+  match goal with
+  | Hb : ep_body _ = Token, Hph : ps_phase _ = Active
+    |- (handle_msg _ _ _ ?s ?g ?p).(es_procs) = _ =>
+      exact (handle_msg_procs_noop s g p (or_introl (conj Hb Hph)))
+  | Hb : ep_body _ = Token, Hph : ps_phase _ = Decided
+    |- (handle_msg _ _ _ ?s ?g ?p).(es_procs) = _ =>
+      exact (handle_msg_procs_noop s g p (or_intror (or_introl (conj Hb Hph))))
+  | Hb : ep_body _ = Echo, Hph : ps_phase _ = Decided
+    |- (handle_msg _ _ _ ?s ?g ?p).(es_procs) = _ =>
+      exact (handle_msg_procs_noop s g p (or_intror (or_intror (or_introl (conj Hb Hph)))))
+  | Hb : ep_body _ = Echo, Hph : ps_phase _ = Idle
+    |- (handle_msg _ _ _ ?s ?g ?p).(es_procs) = _ =>
+      exact (handle_msg_procs_noop s g p (or_intror (or_intror (or_intror (conj Hb Hph)))))
+  end.
+
+(** Equal procs imply equal proc_of. *)
+Lemma proc_of_eq_of_procs (gs gs' : EState) (n : node) :
+    gs.(es_procs) = gs'.(es_procs) ->
+    proc_of gs n = proc_of gs' n.
+Proof. intros H. unfold proc_of. rewrite H. reflexivity. Qed.
+
+(** Equal procs imply equal parent pointers. *)
+Lemma proc_of_parent_eq_of_procs (gs gs' : EState) (n : node) :
+    gs.(es_procs) = gs'.(es_procs) ->
+    (proc_of gs n).(ps_parent) = (proc_of gs' n).(ps_parent).
+Proof. intros H. unfold proc_of. rewrite H. reflexivity. Qed.
+
 (* ================================================================== *)
 (** ** 1b. Parent-pointer invariant for non-initiators *)
 
@@ -162,6 +217,7 @@ Proof.
   unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
 Qed.
 
+(** Step: Token/Idle sets ps_parent = Some sender; all other cases are noop. *)
 Lemma active_non_init_parent_step gs lbl gs' :
     active_non_init_parent gs ->
     lts_trans ELts gs lbl gs' ->
@@ -230,18 +286,15 @@ Proof.
         exists par'. rewrite (Hother n Hmne'). exact Hpar'.
     (* Token / Active: gs'.(es_procs) = es_procs gs0 *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
     (* Token / Decided: gs'.(es_procs) = es_procs gs0 *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
     (* Echo / Idle: gs'.(es_procs) = es_procs gs0 *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
     (* Echo / Active: three sub-cases on pending and parent *)
     + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -290,11 +343,11 @@ Proof.
         -- exact (IH n Hne Hph).
     (* Echo / Decided: gs'.(es_procs) = es_procs gs0 *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (IH n Hne Hph).
 Qed.
 
+(** Invariant holds for all reachable states (by induction). *)
 Lemma active_non_init_parent_holds : is_invariant ELts active_non_init_parent.
 Proof.
   apply invariant_by_induction.
@@ -316,12 +369,15 @@ Qed.
 Definition non_init_not_decided (gs : EState) : Prop :=
   forall n, n <> initiator -> (proc_of gs n).(ps_phase) <> Decided.
 
+(** Base: all nodes start Idle — no one is Decided initially. *)
 Lemma non_init_not_decided_base : forall gs, lts_init ELts gs -> non_init_not_decided gs.
 Proof.
   intros gs [Hproc _] n _ Hph.
   unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
 Qed.
 
+(** Step: only the initiator can become Decided (Echo/Active with parent = None).
+    Non-initiators always have Some parent, so that branch is unreachable for them. *)
 Lemma non_init_not_decided_step gs lbl gs' :
     non_init_not_decided gs ->
     active_non_init_parent gs ->
@@ -374,18 +430,15 @@ Proof.
         exact (IH n Hne Hdec).
     (* Token / Active: procs unchanged (only msgs) *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
     (* Token / Decided: gs' = gs_mid, procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
     (* Echo / Idle: gs' = gs_mid, procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
     (* Echo / Active: three sub-cases *)
     + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -432,11 +485,11 @@ Proof.
         -- rewrite (upd_other _ _ _ _ Hnes) in Hdec. exact (IH n Hne Hdec).
     (* Echo / Decided: gs' = gs_mid, procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hdec. rewrite Hgs'_procs in Hdec. exact (IH n Hne Hdec).
 Qed.
 
+(** Non-initiators are never Decided in any reachable state. *)
 Theorem non_init_not_decided_holds : is_invariant ELts non_init_not_decided.
 Proof.
   (* Prove the conjunction with active_non_init_parent as a combined invariant,
@@ -453,18 +506,23 @@ Qed.
 (* ================================================================== *)
 (** ** 2. Invariants *)
 
+(** Every parent pointer follows an actual graph edge. *)
 Definition parent_is_neighbor (gs : EState) : Prop :=
   forall n par, (proc_of gs n).(ps_parent) = Some par -> adj n par = true.
 
+(** No node is its own parent (the parent graph is acyclic one-hop). *)
 Definition no_self_parent (gs : EState) : Prop :=
   forall n, (proc_of gs n).(ps_parent) <> Some n.
 
+(** The initiator is the root: it never sets a parent pointer. *)
 Definition initiator_no_parent (gs : EState) : Prop :=
   (proc_of gs initiator).(ps_parent) = None.
 
+(** Conjunction of the three tree-shape invariants. *)
 Definition tree_invariant (gs : EState) : Prop :=
   parent_is_neighbor gs /\ no_self_parent gs /\ initiator_no_parent gs.
 
+(** Every entry in a node's [ps_children] list is an adjacent neighbor. *)
 Definition children_are_neighbors (gs : EState) : Prop :=
   forall n child, In child (proc_of gs n).(ps_children) -> adj n child = true.
 
@@ -1001,6 +1059,7 @@ Qed.
 (** Corollaries: project INV onto each individual property.
     These are the externally useful results — clients don't need to know
     about the full INV conjunction. *)
+(** Projections from [INV_holds]: each structural invariant holds separately. *)
 Theorem tree_invariant_holds : is_invariant ELts tree_invariant.
 Proof.
   intros gs Hr. exact (proj1 (INV_holds gs Hr)).
@@ -1035,6 +1094,7 @@ Fixpoint parent_path (gs : EState) (n : node) (k : nat) : option node :=
       end
   end.
 
+(** [n] has a parent chain that reaches the initiator in some finite number of hops. *)
 Definition reaches_initiator (gs : EState) (n : node) : Prop :=
   exists k, parent_path gs n k = Some initiator.
 
@@ -1089,7 +1149,8 @@ Definition active_non_init_has_chain_inv (gs : EState) : Prop :=
     n <> initiator ->
     reaches_initiator gs n.
 
-(** Combined TSC invariant. *)
+(** Combined invariant: idle nodes have no parent, Token sources have chains to the
+    initiator, and every Active non-initiator has a chain to the initiator. *)
 Definition TSC (gs : EState) : Prop :=
   idle_no_parent gs /\ token_src_has_chain gs /\ active_non_init_has_chain_inv gs.
 
@@ -1293,10 +1354,9 @@ Proof.
 
     (* ===== Token / Active ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
-      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent)).
-      { intros n. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
+      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent))
+        by exact (fun n => proc_of_parent_eq_of_procs gs' gs0 n Hgs'_procs).
       split; [| split].
       * intros n Hph. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinp n Hph).
       * intros q Hqin Hqbody.
@@ -1318,10 +1378,9 @@ Proof.
 
     (* ===== Token / Decided ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
-      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent)).
-      { intros n. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
+      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent))
+        by exact (fun n => proc_of_parent_eq_of_procs gs' gs0 n Hgs'_procs).
       split; [| split].
       * intros n Hph. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinp n Hph).
       * intros q Hqin Hqbody.
@@ -1340,10 +1399,9 @@ Proof.
 
     (* ===== Echo / Idle ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
-      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent)).
-      { intros n. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
+      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent))
+        by exact (fun n => proc_of_parent_eq_of_procs gs' gs0 n Hgs'_procs).
       split; [| split].
       * intros n Hph. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinp n Hph).
       * intros q Hqin Hqbody.
@@ -1478,10 +1536,9 @@ Proof.
 
     (* ===== Echo / Decided ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
-      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent)).
-      { intros n. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
+      assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent))
+        by exact (fun n => proc_of_parent_eq_of_procs gs' gs0 n Hgs'_procs).
       split; [| split].
       * intros n Hph. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinp n Hph).
       * intros q Hqin Hqbody.
@@ -1537,6 +1594,10 @@ Definition initiator_decided (gs : EState) : Prop :=
     "Token in flight" branch of B. *)
 (* ================================================================== *)
 
+(* ------------------------------------------------------------------ *)
+(** Utility lemmas used by Group B invariant step proofs. *)
+
+(** [send_to_all src dsts msg] contains a packet for every node in [dsts]. *)
 Lemma in_send_to_all (src : node) (dsts : list node) (msg : echo_msg) (n : node) :
     In n dsts -> In (mkPkt src n msg) (send_to_all src dsts msg).
 Proof.
@@ -1546,6 +1607,7 @@ Proof.
   exists n. split; [reflexivity | exact Hin].
 Qed.
 
+(** A node is in [nbrs m] iff it is adjacent to [m] (and in [all_nodes]). *)
 Lemma in_nbrs_of (m n : node) :
     adj m n = true -> In n all_nodes -> In n (nbrs all_nodes adj m).
 Proof.
@@ -1554,6 +1616,7 @@ Proof.
   apply filter_In. split; [exact Hin | exact Hadj].
 Qed.
 
+(** A packet with a mismatched src or dst survives [remove_pkt]. *)
 Lemma remove_pkt_ne_in (pkt pkt' : @echo_packet node) bag :
     In pkt' bag ->
     (ep_src pkt' <> ep_src pkt \/ ep_dst pkt' <> ep_dst pkt) ->
@@ -1590,6 +1653,7 @@ Proof.
       * simpl. right. exact (IH Htl).
 Qed.
 
+(** A packet with a different body than [pkt] survives [remove_pkt]. *)
 Lemma remove_pkt_body_ne_in (pkt pkt' : @echo_packet node) bag :
     In pkt' bag ->
     ep_body pkt' <> ep_body pkt ->
@@ -1630,12 +1694,15 @@ Definition token_src_not_idle (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Token ->
     (proc_of gs (ep_src pkt)).(ps_phase) <> Idle.
 
+(** Base: holds trivially — initial bag is empty, so no Tokens exist. *)
 Lemma token_src_not_idle_base : forall gs, lts_init ELts gs -> token_src_not_idle gs.
 Proof.
   intros gs [_ Hmsgs] pkt Hin _.
   rewrite Hmsgs in Hin. contradiction.
 Qed.
 
+(** Step: every new Token is sent by step_start (initiator, Active) or
+    Token/Idle (self, just became Active), so the source is never Idle. *)
 Lemma token_src_not_idle_step gs lbl gs' :
     token_src_not_idle gs ->
     lts_trans ELts gs lbl gs' ->
@@ -1739,8 +1806,7 @@ Proof.
 
     (* ===== Token / Active: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       (* msgs = remove_pkt bag ++ [Echo(self,sender)] *)
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
@@ -1753,8 +1819,7 @@ Proof.
 
     (* ===== Token / Decided: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -1764,8 +1829,7 @@ Proof.
 
     (* ===== Echo / Idle: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -1822,8 +1886,7 @@ Proof.
 
     (* ===== Echo / Decided: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -1832,6 +1895,7 @@ Proof.
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 Qed.
 
+(** Invariant A holds for all reachable states. *)
 Theorem token_src_not_idle_holds : is_invariant ELts token_src_not_idle.
 Proof.
   apply invariant_by_induction.
@@ -1855,6 +1919,7 @@ Definition token_sent_or_notidle (gs : EState) : Prop :=
     (exists pkt, In pkt (es_msgs gs) /\
                  ep_src pkt = m /\ ep_dst pkt = n /\ ep_body pkt = Token).
 
+(** Base: all nodes Idle — [Hph] immediately contradicts [ps_phase = Idle]. *)
 Lemma token_sent_or_notidle_base : forall gs, lts_init ELts gs -> token_sent_or_notidle gs.
 Proof.
   intros gs [Hproc _] m n Hm Hn Hadj Hph Hpar.
@@ -1862,6 +1927,8 @@ Proof.
   unfold proc_of. rewrite Hproc. simpl. reflexivity.
 Qed.
 
+(** Step: in Token/Idle, m sends Token(m→n) for every non-parent neighbor n,
+    satisfying the "token in flight" disjunct.  The noop cases fall back to IH. *)
 Lemma token_sent_or_notidle_step gs lbl gs' :
     token_sent_or_notidle gs ->
     lts_trans ELts gs lbl gs' ->
@@ -2007,8 +2074,7 @@ Proof.
 
     (* ===== Token / Active: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hph. rewrite (Hother m) in Hpar.
@@ -2033,8 +2099,7 @@ Proof.
 
     (* ===== Token / Decided: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hph. rewrite (Hother m) in Hpar.
@@ -2057,8 +2122,7 @@ Proof.
 
     (* ===== Echo / Idle: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hph. rewrite (Hother m) in Hpar.
@@ -2258,8 +2322,7 @@ Proof.
 
     (* ===== Echo / Decided: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hph. rewrite (Hother m) in Hpar.
@@ -2274,6 +2337,7 @@ Proof.
         -- exact (conj Hps (conj Hpd Hpb)).
 Qed.
 
+(** Invariant B holds for all reachable states. *)
 Theorem token_sent_or_notidle_holds : is_invariant ELts token_sent_or_notidle.
 Proof.
   apply invariant_by_induction.
@@ -2291,12 +2355,15 @@ Definition parent_is_active (gs : EState) : Prop :=
     forall n, (proc_of gs m).(ps_parent) = Some n ->
     (proc_of gs n).(ps_phase) = Active \/ (proc_of gs n).(ps_phase) = Decided.
 
+(** Base: no parent pointers exist initially — vacuously true. *)
 Lemma parent_is_active_base : forall gs, lts_init ELts gs -> parent_is_active gs.
 Proof.
   intros gs [Hproc _] m _ n Hpar.
   unfold proc_of in Hpar. rewrite Hproc in Hpar. simpl in Hpar. discriminate.
 Qed.
 
+(** Step: in Token/Idle, m sets parent = Some sender; sender sent a Token so
+    it is non-Idle (by token_src_not_idle).  All other cases preserve parents. *)
 Lemma parent_is_active_step gs lbl gs' :
     parent_is_active gs ->
     token_src_not_idle gs ->
@@ -2400,8 +2467,7 @@ Proof.
 
     (* ===== Token / Active: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
@@ -2411,8 +2477,7 @@ Proof.
 
     (* ===== Token / Decided: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
@@ -2422,8 +2487,7 @@ Proof.
 
     (* ===== Echo / Idle: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
@@ -2546,8 +2610,7 @@ Proof.
 
     (* ===== Echo / Decided: procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
@@ -2556,6 +2619,7 @@ Proof.
       * right. rewrite (Hother n). exact Hdec.
 Qed.
 
+(** Invariant C holds for all reachable states. *)
 Theorem parent_is_active_holds : is_invariant ELts parent_is_active.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => parent_is_active gs /\ token_src_not_idle gs)).
@@ -2596,6 +2660,7 @@ Definition pkt_nodes_in_all_nodes (gs : EState) : Prop :=
 Definition parent_in_all_nodes (gs : EState) : Prop :=
   forall n par, (proc_of gs n).(ps_parent) = Some par -> In par all_nodes.
 
+(** Base: empty bag and no parents — both hold vacuously. *)
 Lemma pkt_nodes_in_all_nodes_base : forall gs, lts_init ELts gs ->
     pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs.
 Proof.
@@ -2691,8 +2756,7 @@ Proof.
 
     (* ===== Token / Active: msgs = old ++ [Echo(self,sender)]; procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -2705,8 +2769,7 @@ Proof.
 
     (* ===== Token/Decided: procs unchanged, msgs shrink ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt (es_msgs gs0)).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -2717,8 +2780,7 @@ Proof.
 
     (* ===== Echo/Idle: procs unchanged, msgs shrink ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt (es_msgs gs0)).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -2788,8 +2850,7 @@ Proof.
 
     (* ===== Echo/Decided: procs unchanged, msgs shrink ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt (es_msgs gs0)).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -2799,6 +2860,7 @@ Proof.
       * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hparent_in_all_nodes n par Hpar).
 Qed.
 
+(** All packet endpoints are in [all_nodes] in every reachable state. *)
 Theorem pkt_nodes_in_all_nodes_holds : is_invariant ELts pkt_nodes_in_all_nodes.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs)).
@@ -2809,6 +2871,7 @@ Proof.
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
+(** All parent pointers point into [all_nodes] in every reachable state. *)
 Theorem parent_in_all_nodes_holds : is_invariant ELts parent_in_all_nodes.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs)).
@@ -2821,17 +2884,21 @@ Qed.
 
 (** *** C2. no_mutual_parent *)
 
+(** If m's parent is par, then par's parent is not m (no 2-cycles in the parent graph). *)
 Definition no_mutual_parent_prop (gs : EState) : Prop :=
   forall m par,
     (proc_of gs m).(ps_parent) = Some par ->
     (proc_of gs par).(ps_parent) <> Some m.
 
+(** Base: no parent pointers exist — vacuously true. *)
 Lemma no_mutual_parent_base : forall gs, lts_init ELts gs -> no_mutual_parent_prop gs.
 Proof.
   intros gs [Hproc _] m par Hpar.
   unfold proc_of in Hpar. rewrite Hproc in Hpar. simpl in Hpar. discriminate.
 Qed.
 
+(** Step: Token/Idle sets m's parent = sender; sender had no parent before (it was Active with
+    parent already set toward initiator), so the new pair cannot form a 2-cycle. *)
 Lemma no_mutual_parent_step gs lbl gs' :
     no_mutual_parent_prop gs ->
     parent_is_active gs ->
@@ -2918,16 +2985,13 @@ Proof.
 
     (* Token/Active, Token/Decided, Echo/Idle, Echo/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
 
     (* Echo / Active: parent pointers agree with pre-state *)
@@ -2968,11 +3032,11 @@ Proof.
       exact (Hno_mutual_parent m par Hpar Hcontra).
 
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
 Qed.
 
+(** The parent graph has no 2-cycles in any reachable state. *)
 Theorem no_mutual_parent_holds : is_invariant ELts no_mutual_parent_prop.
 Proof.
   assert (Hcomb : is_invariant ELts
@@ -3026,6 +3090,7 @@ Definition echo_src_not_idle (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
     (proc_of gs (ep_src pkt)).(ps_phase) <> Idle.
 
+(** Base: initial bag is empty — no Echo packets exist. *)
 Lemma echo_src_not_idle_base : forall gs, lts_init ELts gs -> echo_src_not_idle gs.
 Proof.
   intros gs [_ Hmsgs] pkt Hin _.
@@ -3115,8 +3180,7 @@ Proof.
 
     (* Token/Active: procs unchanged; new Echo(self→sender) has body=Echo, src=self=Active *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hself_active : (proc_of gs0 self).(ps_phase) = Active).
       { unfold proc_of. rewrite <- Hpeq. exact Hphase. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
@@ -3131,8 +3195,7 @@ Proof.
 
     (* Token/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -3142,8 +3205,7 @@ Proof.
 
     (* Echo/Idle: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -3203,8 +3265,7 @@ Proof.
 
     (* Echo/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -3213,6 +3274,7 @@ Proof.
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 Qed.
 
+(** Echo senders are never Idle in any reachable state. *)
 Theorem echo_src_not_idle_holds : is_invariant ELts echo_src_not_idle.
 Proof.
   apply invariant_by_induction.
@@ -3229,6 +3291,7 @@ Definition idle_not_in_children (gs : EState) : Prop :=
     (proc_of gs n).(ps_phase) = Idle ->
     ~ In n (proc_of gs m).(ps_children).
 
+(** Base: all children lists start empty — vacuously true. *)
 Lemma idle_not_in_children_base : forall gs, lts_init ELts gs -> idle_not_in_children gs.
 Proof.
   intros gs [Hproc _] m n _ Hin.
@@ -3306,20 +3369,17 @@ Proof.
 
     (* Token/Active: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
     (* Token/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
     (* Echo/Idle: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
     (* Echo/Active: sender added to children(self) *)
@@ -3416,11 +3476,11 @@ Proof.
 
     (* Echo/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 Qed.
 
+(** Idle nodes are never in any [ps_children] list in any reachable state. *)
 Theorem idle_not_in_children_holds : is_invariant ELts idle_not_in_children.
 Proof.
   assert (Hcomb : is_invariant ELts
@@ -3445,6 +3505,7 @@ Definition token_dst_not_parent (gs : EState) : Prop :=
     In pkt (es_msgs gs) -> ep_body pkt = Token ->
     (proc_of gs (ep_src pkt)).(ps_parent) <> Some (ep_dst pkt).
 
+(** Base: empty bag and no parents — vacuously true. *)
 Lemma token_dst_not_parent_base : forall gs, lts_init ELts gs -> token_dst_not_parent gs.
 Proof.
   intros gs [_ Hmsgs] pkt Hin _.
@@ -3555,8 +3616,7 @@ Proof.
 
     (* Token/Active: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -3567,8 +3627,7 @@ Proof.
 
     (* Token/Decided: procs unchanged, msgs shrink (= remove_pkt) *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -3579,8 +3638,7 @@ Proof.
 
     (* Echo/Idle: procs unchanged, msgs shrink (= remove_pkt) *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -3646,8 +3704,7 @@ Proof.
 
     (* Echo/Decided: procs unchanged, msgs = remove_pkt *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
@@ -3657,6 +3714,7 @@ Proof.
       exact (Htoken_dst_not_parent pkt' Hold Hbp).
 Qed.
 
+(** A Token in flight never targets m's own parent in any reachable state. *)
 Theorem token_dst_not_parent_holds : is_invariant ELts token_dst_not_parent.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => token_dst_not_parent gs /\ token_src_not_idle gs)).
@@ -3671,6 +3729,9 @@ Qed.
 (* ------------------------------------------------------------------ *)
 (** *** C6. act_fwds definition and helpers *)
 
+(** The set of forwarding targets for [m]: all neighbors of [m] except its parent
+    (or all neighbors if [m] has no parent, i.e. [m = initiator]).
+    Equivalently: [n ∈ act_fwds(m) ↔ adj m n ∧ parent(m) ≠ Some n]. *)
 Definition act_fwds (gs : EState) (m : node) : list node :=
   filter (fun n =>
     match (proc_of gs m).(ps_parent) with
@@ -3729,6 +3790,7 @@ Definition decided_pending_zero (gs : EState) : Prop :=
   forall n, (proc_of gs n).(ps_phase) = Decided ->
             (proc_of gs n).(ps_pending) = 0.
 
+(** Base: no Decided nodes initially — vacuously true. *)
 Lemma decided_pending_zero_base : forall gs, lts_init ELts gs -> decided_pending_zero gs.
 Proof.
   intros gs [Hproc _] n Hph.
@@ -3785,16 +3847,13 @@ Proof.
       * rewrite (Hother n Hne) in Hph. rewrite (Hother n Hne). exact (Hdpz n Hph).
     (* Token/Active, Token/Decided, Echo/Idle, Echo/Decided: procs unchanged or only phase unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hdpz n Hph).
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hdpz n Hph).
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hdpz n Hph).
     (* Echo/Active: self gets new pending = pred(pending), possibly Decides *)
     + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -3850,11 +3909,11 @@ Proof.
            destruct (node_eq self n) as [Heq' | _]; [exact (False_ind _ (Hne (eq_sym Heq'))) |].
            simpl. exact (Hdpz n Hph).
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hdpz n Hph).
 Qed.
 
+(** Decided nodes always have pending = 0 in any reachable state. *)
 Theorem decided_pending_zero_holds : is_invariant ELts decided_pending_zero.
 Proof.
   apply invariant_by_induction.
@@ -3866,13 +3925,17 @@ Qed.
 (* ------------------------------------------------------------------ *)
 (** *** Helper invariants for the pending-count argument *)
 
-(** Count nodes in act_fwds(m) not yet in children(m). *)
+(** Number of forwarding targets of [m] that have not yet echoed back:
+    [|act_fwds(m) \\ children(m)|].  Decreases by 1 when each echo arrives. *)
 Definition remaining_fwds (gs : EState) (m : node) : nat :=
   length (filter (fun n =>
     negb (existsb (fun c => if node_eq c n then true else false)
                   (proc_of gs m).(ps_children)))
     (act_fwds gs m)).
 
+(** [pending(m)] is always at least the number of remaining forwarding targets.
+    This is the key invariant for the pending-chain argument: if [remaining_fwds ≥ 1]
+    then [pending ≥ 1], meaning m is still waiting. *)
 Definition weak_pending_ge_count (gs : EState) : Prop :=
   forall m,
     ((proc_of gs m).(ps_phase) = Active \/ (proc_of gs m).(ps_phase) = Decided) ->
@@ -4431,6 +4494,7 @@ Proof.
         [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)].
 Qed.
 
+(** At most one copy of each Token exists in the bag in any reachable state. *)
 Theorem token_at_most_once_holds : is_invariant ELts token_at_most_once.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => token_at_most_once gs /\ token_src_not_idle gs)).
@@ -4443,10 +4507,14 @@ Proof.
 Qed.
 
 (** *** C9. token_from_parent_consumed *)
+
+(** If n's parent is p, the activation Token [Token(p→n)] is no longer in the bag.
+    Once n becomes Active (Token/Idle consumed the token), it is gone permanently. *)
 Definition token_from_parent_consumed (gs : EState) : Prop :=
   forall n p, (proc_of gs n).(ps_parent) = Some p ->
     ~ In (mkPkt p n Token) (es_msgs gs).
 
+(** Base: empty bag — trivially no Token remains. *)
 Lemma token_from_parent_consumed_base : forall gs, lts_init ELts gs -> token_from_parent_consumed gs.
 Proof.
   intros gs [_ Hmsgs] n p _ Hin.
@@ -4574,8 +4642,7 @@ Proof.
 
     (* Token/Active: procs unchanged, Echo added *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply in_app_iff in Hpin as [Hold | Hnew].
@@ -4586,8 +4653,7 @@ Proof.
 
     (* Token/Decided: procs unchanged, pkt dropped *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -4596,8 +4662,7 @@ Proof.
 
     (* Echo/Idle: procs unchanged, pkt dropped *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -4656,8 +4721,7 @@ Proof.
 
     (* Echo/Decided: procs unchanged, pkt dropped *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
-      { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
-        rewrite Hbody, Hphase. reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
@@ -4665,6 +4729,7 @@ Proof.
       exact (Htoken_from_parent n par Hpar Hpin).
 Qed.
 
+(** Once a node is active, its activation Token is no longer in the bag. *)
 Theorem token_from_parent_consumed_holds : is_invariant ELts token_from_parent_consumed.
 Proof.
   assert (Hcomb : is_invariant ELts
@@ -4686,6 +4751,10 @@ Qed.
 (* ================================================================== *)
 (** *** C10. pending_pos_active *)
 
+(** If m is Active, has parent par, and still has pending ≥ 1, then:
+    - m has NOT yet sent its Echo(m→par) — that send happens only when pending drops to 0, and
+    - m is NOT yet in par's children list — par registers m only when it receives m's Echo.
+    Together these facts make [remaining_fwds(m) ≥ 1] observable from above. *)
 Definition pending_pos_active (gs : EState) : Prop :=
   forall m par,
     (proc_of gs m).(ps_phase) = Active ->
@@ -4694,6 +4763,7 @@ Definition pending_pos_active (gs : EState) : Prop :=
     ~ In (mkPkt m par Echo) (es_msgs gs) /\
     ~ In m (proc_of gs par).(ps_children).
 
+(** Base: no Active nodes initially — vacuously true. *)
 Lemma pending_pos_active_base : forall gs, lts_init ELts gs -> pending_pos_active gs.
 Proof.
   intros gs [Hproc _] m par Hph _ _.
@@ -4803,7 +4873,7 @@ Proof.
            ++ rewrite (Hother par Hnep); exact Hchild.
     + (* Token/Active *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hmg : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
       { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
@@ -4817,7 +4887,7 @@ Proof.
       * unfold proc_of; rewrite Hpr; exact Hchild.
     + (* Token/Decided *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
       destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
       * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
@@ -4825,7 +4895,7 @@ Proof.
       * unfold proc_of; rewrite Hpr; exact Hchild.
     + (* Echo/Idle *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
       destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
       * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
@@ -4929,7 +4999,7 @@ Proof.
               ** unfold proc_of; exact Hchild.
     + (* Echo/Decided *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
       destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
       * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
@@ -4937,6 +5007,7 @@ Proof.
       * unfold proc_of; rewrite Hpr; exact Hchild.
 Qed.
 
+(** If m is Active and pending ≥ 1, then m's Echo is not in the bag and m ∉ parent's children. *)
 Theorem pending_pos_active_holds : is_invariant ELts pending_pos_active.
 Proof.
   assert (Hcomb : is_invariant ELts
@@ -4966,7 +5037,10 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** *** Helper invariants for weak_pending_ge_count *)
+(** *** Group D sub-invariants: echo accounting
+    These six invariants relate Echo packets, the [ps_children] list, and
+    [ps_pending].  They must be proved simultaneously (in [token_echo_accounting_step])
+    because each case may need one or more of the others from the pre-state. *)
 
 (** echo_dst_not_idle: Every Echo in the bag targets a non-Idle node (the destination is Active or Decided). *)
 Definition echo_dst_not_idle (gs : EState) : Prop :=
@@ -5004,6 +5078,8 @@ Definition pending_exact_count_ge (gs : EState) : Prop :=
 Definition echo_at_most_once (gs : EState) : Prop :=
   forall pkt, ep_body pkt = Echo -> count_pkt pkt (es_msgs gs) <= 1.
 
+(** Corollary: if an Echo appears exactly once in the bag, it is not in the bag
+    after being removed by [remove_pkt].  Used in Echo/Active step proofs. *)
 Lemma echo_at_most_once_remove_not_in (gs : EState) (pkt : @echo_packet node) :
     echo_at_most_once gs ->
     ep_body pkt = Echo ->
@@ -5028,6 +5104,7 @@ Proof.
            (Nat.lt_succ_diag_r count) HScount_le_count)).
 Qed.
 
+(** Base: empty bag — [count_pkt] of anything in [] = 0 ≤ 1. *)
 Lemma echo_at_most_once_base : forall gs, lts_init ELts gs -> echo_at_most_once gs.
 Proof.
   intros gs [_ Hmsgs] p _. unfold count_pkt. rewrite Hmsgs. simpl. exact (Nat.le_0_l _).
@@ -5250,6 +5327,8 @@ Qed.
 
 (** Helper: act_fwds gs' self = filter (fun n => if n=sender then false else adj self n) all_nodes
     when parent(self in gs') = Some sender. *)
+(** When parent(m) = Some sender, act_fwds reduces to the simple filter
+    [n ∈ all_nodes | adj m n ∧ n ≠ sender]. *)
 Lemma act_fwds_some_eq gs m sender :
     (proc_of gs m).(ps_parent) = Some sender ->
     act_fwds gs m =
@@ -5258,7 +5337,8 @@ Proof.
   intro Hpar. unfold act_fwds. rewrite Hpar. reflexivity.
 Qed.
 
-(** Helper: filter with adj and ne equals filter ne applied to nbrs. *)
+(** [act_fwds_some_eq] with adj filtered: the non-parent neighbors of m
+    excluding sender can be computed by filtering [nbrs m] instead of [all_nodes]. *)
 Lemma filter_adj_ne_parent_eq (m sender : node) :
     filter (fun n => if node_eq n sender then false else adj m n) all_nodes =
     filter (fun n => if node_eq n sender then false else true) (nbrs all_nodes adj m).
@@ -5274,7 +5354,9 @@ Proof.
     + exact IH.
 Qed.
 
-(** Combined step lemma: prove 6 new invariants simultaneously. *)
+(** Combined step lemma: prove all 6 echo-accounting sub-invariants simultaneously.
+    They must be proved together because each preservation case may need one or more of
+    the others in the pre-state.  The 19-way conjunction below is the full closed set. *)
 Lemma token_echo_accounting_step gs lbl gs' :
     echo_dst_not_idle gs -> echo_token_sender_not gs ->
     children_implies_no_parent_token gs -> echo_not_in_children gs ->
@@ -5504,11 +5586,11 @@ Proof.
 
     (* ======================================== Token / Active *)
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hmg : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
       { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
       assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
-        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+        by exact (fun q => proc_of_eq_of_procs gs' gs0 q Hpr).
       assert (Hmg_cla : forall q, In q (es_msgs gs') ->
           In q (es_msgs gs_mid) \/ q = mkPkt self sender Echo).
       { intro q; rewrite Hmg; intro H; apply in_app_iff in H as [H|H];
@@ -5560,9 +5642,9 @@ Proof.
     (* ======================================== Token / Decided, Echo / Idle, Echo / Decided *)
     (* These three cases are identical: procs unchanged, msgs shorten by remove_pkt. *)
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
-        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+        by exact (fun q => proc_of_eq_of_procs gs' gs0 q Hpr).
       assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
       { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
@@ -5578,9 +5660,9 @@ Proof.
           (apply act_fwds_parent_agree; rewrite Hprf; reflexivity).
         rewrite Hag. rewrite Hprf. exact H.
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
-        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+        by exact (fun q => proc_of_eq_of_procs gs' gs0 q Hpr).
       assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
       { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
@@ -5915,9 +5997,9 @@ Proof.
 
     (* ======================================== Echo / Decided *)
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
-        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+        by exact (fun q => proc_of_eq_of_procs gs' gs0 q Hpr).
       assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
       { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
@@ -5963,6 +6045,7 @@ Definition token_echo_accounting (gs : EState) : Prop :=
   INV gs /\
   echo_at_most_once gs.
 
+(** The 19-component conjunction [token_echo_accounting] holds for all reachable states. *)
 Theorem token_echo_accounting_holds : is_invariant ELts token_echo_accounting.
 Proof.
   apply invariant_by_induction.
@@ -6016,6 +6099,7 @@ Proof.
     + exact (echo_at_most_once_step gs lbl gs' Hecho_at_most_once Hecho_src_not_idle Hecho_token_sender_not Hpending_pos Hstep).
 Qed.
 
+(** Projections from [token_echo_accounting_holds] — one theorem per sub-invariant. *)
 Theorem echo_dst_not_idle_holds : is_invariant ELts echo_dst_not_idle.
 Proof. intros gs Hr. exact (proj1 (token_echo_accounting_holds gs Hr)). Qed.
 
@@ -6119,12 +6203,15 @@ Qed.
 Definition nodup_children_inv (gs : EState) : Prop :=
   forall m, NoDup (proc_of gs m).(ps_children).
 
+(** Base: all children lists start empty — NoDup [] holds trivially. *)
 Lemma ndc_init : forall gs, lts_init ELts gs -> nodup_children_inv gs.
 Proof.
   intros gs [Hproc _] m.
   unfold proc_of. rewrite Hproc. simpl. exact (NoDup_nil _).
 Qed.
 
+(** Step: Echo/Active prepends [sender]; sender ∉ old children (by echo_not_in_children)
+    so NoDup is preserved. All other cases leave children unchanged. *)
 Lemma ndc_step gs lbl gs' :
     nodup_children_inv gs -> echo_not_in_children gs -> token_at_most_once gs ->
     lts_trans ELts gs lbl gs' -> nodup_children_inv gs'.
@@ -6162,15 +6249,15 @@ Proof.
       * rewrite (Hother m Hne). exact (Hndc m).
     + (* Token/Active *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of. rewrite Hpr. exact (Hndc m).
     + (* Token/Decided *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of. rewrite Hpr. exact (Hndc m).
     + (* Echo/Idle *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of. rewrite Hpr. exact (Hndc m).
     + (* Echo/Active: sender added to children(self) *)
       destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -6223,11 +6310,12 @@ Proof.
            destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
            unfold proc_of. exact (Hndc m).
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of. rewrite Hpr. exact (Hndc m).
 Qed.
 
 (** nodup_children_holds: *)
+(** [ps_children] lists are duplicate-free in every reachable state. *)
 Theorem nodup_children_holds : is_invariant ELts nodup_children_inv.
 Proof.
   assert (Hcomb : is_invariant ELts
@@ -6306,6 +6394,8 @@ Definition children_in_all_nodes (gs : EState) : Prop :=
     c was ep_src of pkt, and pkt ∈ old_bag, so c ∈ all_nodes. Once c is in children, it stays in all_nodes
     since all_nodes doesn't change (it's a Variable). *)
 
+(** Step: Echo/Active adds sender (ep_src of packet ∈ bag) to children;
+    pkt_nodes_in_all_nodes guarantees sender ∈ all_nodes. *)
 Lemma cian_step gs lbl gs' :
     children_in_all_nodes gs ->
     pkt_nodes_in_all_nodes gs ->
@@ -6346,15 +6436,15 @@ Proof.
       * rewrite (Hother m Hne) in Hch. exact (Hcian m c Hch).
     + (* Token/Active *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
     + (* Token/Decided *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
     + (* Echo/Idle *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
     + (* Echo/Active: self.children grows by sender *)
       destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -6394,10 +6484,11 @@ Proof.
            ** exact (Hcian self c Hrest).
         ++ unfold proc_of in Hch. exact (Hcian m c Hch).
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
 Qed.
 
+(** Every child node is in [all_nodes] in every reachable state. *)
 Theorem children_in_all_nodes_holds : is_invariant ELts children_in_all_nodes.
 Proof.
   assert (Hcomb : is_invariant ELts
@@ -6422,6 +6513,8 @@ Definition children_parent_ne (gs : EState) : Prop :=
   forall m c, In c (proc_of gs m).(ps_children) ->
     (proc_of gs m).(ps_parent) <> Some c.
 
+(** Step: Echo/Active adds sender to self's children; echo_src_in_fwds ensures
+    sender ≠ self's parent.  All other cases leave parent/children unchanged. *)
 Lemma children_parent_ne_step gs lbl gs' :
     children_parent_ne gs -> echo_src_in_fwds gs ->
     lts_trans ELts gs lbl gs' -> children_parent_ne gs'.
@@ -6463,13 +6556,13 @@ Proof.
       * rewrite (Hother m Hne) in Hch. rewrite (Hother m Hne). exact (Hcpne m c Hch).
     + (* Token/Active *)
       assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
     + (* Echo/Active: sender added to children(self). parent(self) preserved (or changed to None). *)
       destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -6527,10 +6620,11 @@ Proof.
            ** exact (Hcpne self c Hrest).
         ++ unfold proc_of in Hch |- *. exact (Hcpne m c Hch).
     + assert (Hpr : es_procs gs' = es_procs gs0).
-      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      { unfold gs'. noop_procs_tac. }
       unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
 Qed.
 
+(** A node's parent is never in its own children list in any reachable state. *)
 Theorem children_parent_ne_holds : is_invariant ELts children_parent_ne.
 Proof.
   assert (Hcomb : is_invariant ELts
@@ -6589,6 +6683,7 @@ Proof.
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
+(** [pending(m) ≥ remaining_fwds(m)] for all Active/Decided m in every reachable state. *)
 Theorem weak_pending_ge_count_holds : is_invariant ELts weak_pending_ge_count.
 Proof.
   intros gs Hr m Hph.
@@ -6625,6 +6720,9 @@ Qed.
     initiator in finitely many steps (by [active_non_init_has_chain]).
     Therefore pending(initiator) >= 1. *)
 
+(** If m is Active with pending ≥ 1, then m's parent also has pending ≥ 1.
+    Key: m ∉ parent's children (pending_pos_active) and m ∈ act_fwds(parent)
+    imply remaining_fwds(parent) ≥ 1, hence pending(parent) ≥ 1. *)
 Lemma pending_propagates :
   forall gs, reachable ELts gs ->
     forall m par,
@@ -6661,6 +6759,8 @@ Proof.
   exact (weak_pending_ge_count_holds gs Hr par Hpar_phase).
 Qed.
 
+(** If any Active node m has pending ≥ 1, the initiator also has pending ≥ 1.
+    Follows by induction on the parent chain (via [pending_propagates] at each hop). *)
 Lemma pending_chain_to_initiator :
   forall gs, reachable ELts gs ->
     forall m,
@@ -6758,15 +6858,19 @@ Qed.
 (* ================================================================== *)
 
 (** BFS spanning tree rooted at [initiator].
-    [wave_depth n] is the depth of n in the tree; every non-initiator has
-    a neighbor of strictly smaller depth (graph connectivity). *)
+    [wave_depth n] is the depth of n in the BFS tree; every non-initiator has
+    at least one neighbor of strictly smaller depth (graph connectivity property). *)
 Variable wave_depth : node -> nat.
+(** Combined connectivity assumptions: initiator is at depth 0, and every
+    other node has a neighbor strictly closer to the root. *)
 Variable wave_depth_props :
   wave_depth initiator = 0 /\
   forall n, In n all_nodes -> n <> initiator ->
     exists m, In m all_nodes /\ adj n m = true /\ wave_depth m < wave_depth n.
 
+(** Accessor: the initiator is at depth 0. *)
 Definition wave_depth_initiator : wave_depth initiator = 0 := proj1 wave_depth_props.
+(** Accessor: every non-initiator has a shallower neighbor. *)
 Definition wave_depth_nbr :
   forall n, In n all_nodes -> n <> initiator ->
     exists m, In m all_nodes /\ adj n m = true /\ wave_depth m < wave_depth n :=
@@ -6946,6 +7050,9 @@ Qed.
     upd_self / proc_of_upd drive the update_proc reduction instead of
     rewrite upd_self, which fails when es_procs (mkEchoState ...) is not
     reduced by cbn. *)
+(** step_start strictly decreases [idle_count]: the initiator transitions from
+    Idle to Active, reducing the count by exactly 1 (NoDup guarantees it
+    appears exactly once in [all_nodes]). *)
 Lemma start_decreases_idle gs :
     (proc_of gs initiator).(ps_phase) = Idle ->
     idle_count (initiator_start node_eq initiator all_nodes adj gs)
