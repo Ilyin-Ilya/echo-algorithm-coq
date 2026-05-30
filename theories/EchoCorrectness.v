@@ -57,7 +57,14 @@ Definition proc_of (gs : EState) (n : node) : @proc_state node :=
   gs.(es_procs) n.
 
 (* ================================================================== *)
-(** ** 1. Helper lemmas *)
+(** * Group A — Core algorithm invariants
+
+    INV: structural invariants (parent pointers, packet validity,
+         initiator bookkeeping).
+    TSC: every Active non-initiator has a parent chain to the initiator.
+    These are proved by straightforward induction and form the base layer
+    that all later invariants build on. *)
+(* ================================================================== *)
 
 (** update_proc: reading back the written slot vs any other slot. *)
 Lemma upd_self (f : node -> @proc_state node) n s :
@@ -1515,7 +1522,20 @@ Definition initiator_decided (gs : EState) : Prop :=
   (proc_of gs initiator).(ps_phase) = Decided.
 
 (* ================================================================== *)
-(** ** Helper lemmas for one_hop_active *)
+(** * Group B — Token propagation: why every node eventually activates
+
+    Three invariants jointly prove [one_hop_active]: if the initiator has
+    decided and m is Active with adj m n (m closer to the root), then n
+    is Active.
+
+      A. token_src_not_idle      — Token senders are never Idle.
+      B. token_sent_or_notidle   — Active m has either already activated n,
+                                   or a Token(m→n) is still in flight.
+      C. parent_is_active        — m's parent is always Active or Decided.
+
+    Together with [no_token_idle_decided] (Group D), these discharge the
+    "Token in flight" branch of B. *)
+(* ================================================================== *)
 
 Lemma in_send_to_all (src : node) (dsts : list node) (msg : echo_msg) (n : node) :
     In n dsts -> In (mkPkt src n msg) (send_to_all src dsts msg).
@@ -2548,7 +2568,24 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** ** pkt_nodes_in_all_nodes and parent_in_all_nodes *)
+(** * Group C — Supporting invariants (independently proved)
+
+    These invariants are proved separately (each by its own
+    [invariant_by_induction]) and are bundled into [token_echo_accounting]
+    in Group D purely so their step-case instances are available as
+    hypotheses inside that combined proof.
+
+      - pkt_nodes_in_all_nodes / parent_in_all_nodes  Connectivity
+      - no_mutual_parent                               No 2-cycles
+      - echo_src_not_idle                              Echo senders are Active
+      - idle_not_in_children                           Idle ∉ children
+      - token_dst_not_parent                           Token → non-parent dst
+      - decided_pending_zero                           Decided ↔ pending = 0
+      - token_at_most_once                             ≤ 1 copy per Token
+      - token_from_parent_consumed                     Activation Token gone once active *)
+(* ================================================================== *)
+
+(** *** C1. pkt_nodes_in_all_nodes / parent_in_all_nodes *)
 
 (** Every packet in the bag has src and dst in all_nodes. *)
 Definition pkt_nodes_in_all_nodes (gs : EState) : Prop :=
@@ -2782,8 +2819,7 @@ Proof.
   intros gs Hr. exact (proj2 (Hcomb gs Hr)).
 Qed.
 
-(* ================================================================== *)
-(** ** no_mutual_parent: no two nodes are mutual parents *)
+(** *** C2. no_mutual_parent *)
 
 Definition no_mutual_parent_prop (gs : EState) : Prop :=
   forall m par,
@@ -2962,15 +2998,29 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** ** §8. Pending-chain argument: no Token reaches an Idle node when decided
+(** * Group D — Pending-chain argument: [no_token_idle_decided]
 
-    Strategy: maintain a battery of state invariants about Tokens, Echoes, children
-    lists, and pending counts.  Together they let us prove that Token(m→n) in the
-    bag ∧ n Idle ⟹ pending(m) >= 1 ⟹ (up the parent chain) ⟹ pending(initiator) >= 1
-    ⟹ initiator cannot yet be Decided — contradiction. *)
+    Proves: when the initiator decides, no Token in the bag targets an
+    Idle node.
 
-(* ------------------------------------------------------------------ *)
-(** *** echo_src_not_idle: Echo senders are never Idle. *)
+    Strategy (pending-chain contradiction):
+      Token(m→n) in bag ∧ n Idle
+        ⟹  n ∈ act_fwds(m) ∧ n ∉ children(m)      [token_dst_not_parent + idle_not_in_children]
+        ⟹  pending(m) ≥ 1                           [pending_exact_count_ge]
+        ⟹  Echo(m→parent(m)) not yet sent           [pending_pos_active]
+        ⟹  m ∉ children(parent(m))                  [echo_not_in_children]
+        ⟹  pending(parent(m)) ≥ 1                   [pending_exact_count_ge again]
+        ⟹  ... (up the parent chain) ...
+        ⟹  pending(initiator) ≥ 1
+        ⟹  initiator not Decided                     [decided_pending_zero]
+        ⟹  contradiction.
+
+    The eight "core" invariants (echo_X, children_X, pending_X) are proved
+    together as [token_echo_accounting] because their Echo/Active step cases
+    mutually depend on each other. *)
+(* ================================================================== *)
+
+(** *** C3. echo_src_not_idle *)
 
 Definition echo_src_not_idle (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
@@ -3172,7 +3222,7 @@ Proof.
 Qed.
 
 (* ------------------------------------------------------------------ *)
-(** *** idle_not_in_children: Idle nodes never appear in any children list. *)
+(** *** C4. idle_not_in_children *)
 
 Definition idle_not_in_children (gs : EState) : Prop :=
   forall m n,
@@ -3388,8 +3438,7 @@ Proof.
 Qed.
 
 (* ------------------------------------------------------------------ *)
-(** *** Invariant: token_dst_not_parent
-    The destination of a Token packet is not the source's parent. *)
+(** *** C5. token_dst_not_parent *)
 
 Definition token_dst_not_parent (gs : EState) : Prop :=
   forall pkt,
@@ -3620,10 +3669,7 @@ Proof.
 Qed.
 
 (* ------------------------------------------------------------------ *)
-(** *** Definition: act_fwds
-    The set of nodes that node m forwards Tokens to (all adj neighbors
-    except parent(m)). This equals the set m would use in the Token/Idle
-    case if m had just received a Token. *)
+(** *** C6. act_fwds definition and helpers *)
 
 Definition act_fwds (gs : EState) (m : node) : list node :=
   filter (fun n =>
@@ -3677,9 +3723,7 @@ Proof.
 Qed.
 
 (* ------------------------------------------------------------------ *)
-(** *** Invariant: decided_pending_zero
-    A Decided node has pending = 0. Only the initiator can be Decided,
-    and it becomes Decided with pending explicitly set to 0. *)
+(** *** C7. decided_pending_zero *)
 
 Definition decided_pending_zero (gs : EState) : Prop :=
   forall n, (proc_of gs n).(ps_phase) = Decided ->
@@ -3907,10 +3951,7 @@ Qed.
     (C) echo_not_in_children (enic):
         Echo(A→B) ∈ bag → A ∉ children(B). *)
 
-(** (A) token_at_most_once (tamo): each Token(src→dst) packet appears
-    at most once by position in the message bag.
-
-    We use a structural matching predicate and length-of-filter count. *)
+(** *** C8. token_at_most_once *)
 
 Definition pkt_matches (p q : @echo_packet node) : bool :=
   match node_eq (ep_src p) (ep_src q) with
@@ -4401,7 +4442,7 @@ Proof.
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
-(** (A) token_from_parent_consumed (tfpc): parent(n) = Some p → Token(p→n) ∉ bag. *)
+(** *** C9. token_from_parent_consumed *)
 Definition token_from_parent_consumed (gs : EState) : Prop :=
   forall n p, (proc_of gs n).(ps_parent) = Some p ->
     ~ In (mkPkt p n Token) (es_msgs gs).
@@ -4643,7 +4684,7 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** *** pending_pos_active: If m is Active, pending(m) >= 1, and parent(m) = par, then Echo(m→par) is not yet in the bag. *)
+(** *** C10. pending_pos_active *)
 
 Definition pending_pos_active (gs : EState) : Prop :=
   forall m par,
@@ -5892,19 +5933,34 @@ Proof.
         rewrite Hag. rewrite Hprf. exact H.
 Qed.
 
+(** *** D1. Core echo/pending invariants (token_echo_accounting) *)
+
 (** The invariants are proved together as [token_echo_accounting] because their
     step-case proofs mutually depend on each other (e.g. [pending_exact_count_ge]
     needs [echo_src_in_fwds] and [echo_not_in_children] in the Echo/Active case).
     We use [invariant_by_induction] with a 19-component conjunction. *)
 Definition token_echo_accounting (gs : EState) : Prop :=
-  echo_dst_not_idle gs /\ echo_token_sender_not gs /\
-  children_implies_no_parent_token gs /\ echo_not_in_children gs /\
-  echo_src_in_fwds gs /\ pending_exact_count_ge gs /\
-  pending_pos_active gs /\ token_at_most_once gs /\
-  token_from_parent_consumed gs /\ parent_is_active gs /\
-  idle_not_in_children gs /\ token_src_not_idle gs /\ echo_src_not_idle gs /\
-  pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs /\
-  token_dst_not_parent gs /\ no_mutual_parent_prop gs /\ INV gs /\
+  (** Echo mutual-exclusion and ordering **)
+  echo_dst_not_idle gs /\              (* Echo dst is Active or Decided *)
+  echo_token_sender_not gs /\          (* Echo(A→B) in bag → Token(B→A) not in bag *)
+  children_implies_no_parent_token gs /\ (* c ∈ children(m) → Token(m,c) not in bag *)
+  echo_not_in_children gs /\           (* Echo(n→m) in bag → n ∉ children(m) *)
+  echo_src_in_fwds gs /\               (* Echo(n→m) in bag → parent(m) ≠ n *)
+  (** Pending count: pending(m) + |children(m)| ≥ |act_fwds(m)| **)
+  pending_exact_count_ge gs /\
+  pending_pos_active gs /\             (* pending ≥ 1 → Echo to parent not yet sent *)
+  (** Pre-proved invariants included so step proofs have them as hypotheses **)
+  token_at_most_once gs /\
+  token_from_parent_consumed gs /\
+  parent_is_active gs /\
+  idle_not_in_children gs /\
+  token_src_not_idle gs /\
+  echo_src_not_idle gs /\
+  pkt_nodes_in_all_nodes gs /\
+  parent_in_all_nodes gs /\
+  token_dst_not_parent gs /\
+  no_mutual_parent_prop gs /\
+  INV gs /\
   echo_at_most_once gs.
 
 Theorem token_echo_accounting_holds : is_invariant ELts token_echo_accounting.
@@ -6562,9 +6618,9 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** *** pending_propagates and pending_chain_to_initiator
+(** *** D2. Pending chain: propagates up to initiator *)
 
-    Starting from any Active node m with pending >= 1, repeatedly apply
+(** Starting from any Active node m with pending >= 1, repeatedly apply
     [pending_propagates] along the parent chain.  The chain reaches the
     initiator in finitely many steps (by [active_non_init_has_chain]).
     Therefore pending(initiator) >= 1. *)
@@ -6692,6 +6748,14 @@ Proof.
   assert (Hzero := decided_pending_zero_holds gs Hr initiator Hdec).
   rewrite Hzero in Hpend_init. inversion Hpend_init.
 Qed.
+
+(* ================================================================== *)
+(** * Group E — Main theorems
+
+    [one_hop_active]:            Groups B + D ⟹ Active m adj n ⟹ Active n.
+    [decided_implies_all_active]: Induction on [wave_depth] (BFS connectivity).
+    [decided_reaches_initiator]:  A + TSC ⟹ spanning tree complete. *)
+(* ================================================================== *)
 
 (** BFS spanning tree rooted at [initiator].
     [wave_depth n] is the depth of n in the tree; every non-initiator has
