@@ -1,4 +1,25 @@
-(** * Correctness of the Echo Algorithm — full proofs *)
+(** * Correctness of the Echo Algorithm
+
+    Main theorem: [decided_reaches_initiator] — when the initiator decides,
+    every node has a parent chain to the initiator (the spanning tree is complete).
+
+    Proof roadmap:
+    1. [INV_holds]:                 Structural invariants (parent pointers, packet validity).
+    2. [TSC_holds]:                 Every active non-initiator traces back to the initiator.
+    3. [one_hop_active]:            If m is active and adj m n (m closer), then n is active.
+       Proved from three sub-invariants:
+         - token_src_not_idle:       Token senders are never idle.
+         - token_sent_or_notidle:    Active node m has either activated n, or a Token is in flight.
+         - parent_is_active:         A node's parent is always active.
+       Plus [no_token_idle_decided]: When the initiator decides, no in-flight Token targets an idle node.
+       [no_token_idle_decided] is proved via a pending-chain argument (see §8 below).
+    4. [decided_implies_all_active]: Consequence of one_hop_active + connectivity (wave_depth).
+    5. [decided_reaches_initiator]:  Combines 4 with TSC.
+
+    §8 — Pending-chain argument for no_token_idle_decided:
+    If Token(m→n) is in the bag and n is Idle, then m's pending count >= 1
+    (n hasn't echoed back yet).  Propagating up the parent chain shows the
+    initiator's pending >= 1, contradicting Decided (which sets pending to 0). *)
 
 From Stdlib Require Import List Arith Bool Arith.Wf_nat Init.Wf Wellfounded.Inverse_Image Lia.
 Import ListNotations.
@@ -128,13 +149,13 @@ Definition active_non_init_parent (gs : EState) : Prop :=
     (proc_of gs n).(ps_phase) = Active ->
     exists par, (proc_of gs n).(ps_parent) = Some par.
 
-Lemma anip_init : forall gs, lts_init ELts gs -> active_non_init_parent gs.
+Lemma active_non_init_parent_base : forall gs, lts_init ELts gs -> active_non_init_parent gs.
 Proof.
   intros gs [Hproc Hmsgs] n Hne Hph.
   unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
 Qed.
 
-Lemma anip_step gs lbl gs' :
+Lemma active_non_init_parent_step gs lbl gs' :
     active_non_init_parent gs ->
     lts_trans ELts gs lbl gs' ->
     active_non_init_parent gs'.
@@ -270,9 +291,9 @@ Qed.
 Lemma active_non_init_parent_holds : is_invariant ELts active_non_init_parent.
 Proof.
   apply invariant_by_induction.
-  - apply anip_init.
+  - apply active_non_init_parent_base.
   - intros gs lbl gs' Hinv Hstep.
-    exact (anip_step gs lbl gs' Hinv Hstep).
+    exact (active_non_init_parent_step gs lbl gs' Hinv Hstep).
 Qed.
 
 (* ================================================================== *)
@@ -288,13 +309,13 @@ Qed.
 Definition non_init_not_decided (gs : EState) : Prop :=
   forall n, n <> initiator -> (proc_of gs n).(ps_phase) <> Decided.
 
-Lemma nind_init : forall gs, lts_init ELts gs -> non_init_not_decided gs.
+Lemma non_init_not_decided_base : forall gs, lts_init ELts gs -> non_init_not_decided gs.
 Proof.
   intros gs [Hproc _] n _ Hph.
   unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
 Qed.
 
-Lemma nind_step gs lbl gs' :
+Lemma non_init_not_decided_step gs lbl gs' :
     non_init_not_decided gs ->
     active_non_init_parent gs ->
     lts_trans ELts gs lbl gs' ->
@@ -415,10 +436,10 @@ Proof.
      then project. *)
   assert (Hcombined : is_invariant ELts (fun gs => non_init_not_decided gs /\ active_non_init_parent gs)).
   { apply invariant_by_induction.
-    - intros gs Hi. split; [apply nind_init | apply anip_init]; exact Hi.
+    - intros gs Hi. split; [apply non_init_not_decided_base | apply active_non_init_parent_base]; exact Hi.
     - intros gs lbl gs' [Hnind Hanip] Hstep. split.
-      + exact (nind_step gs lbl gs' Hnind Hanip Hstep).
-      + exact (anip_step gs lbl gs' Hanip Hstep). }
+      + exact (non_init_not_decided_step gs lbl gs' Hnind Hanip Hstep).
+      + exact (active_non_init_parent_step gs lbl gs' Hanip Hstep). }
   intros gs Hr. exact (proj1 (Hcombined gs Hr)).
 Qed.
 
@@ -1589,18 +1610,18 @@ Definition token_src_not_idle (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Token ->
     (proc_of gs (ep_src pkt)).(ps_phase) <> Idle.
 
-Lemma tsni_init : forall gs, lts_init ELts gs -> token_src_not_idle gs.
+Lemma token_src_not_idle_base : forall gs, lts_init ELts gs -> token_src_not_idle gs.
 Proof.
   intros gs [_ Hmsgs] pkt Hin _.
   rewrite Hmsgs in Hin. contradiction.
 Qed.
 
-Lemma tsni_step gs lbl gs' :
+Lemma token_src_not_idle_step gs lbl gs' :
     token_src_not_idle gs ->
     lts_trans ELts gs lbl gs' ->
     token_src_not_idle gs'.
 Proof.
-  intros Htsni Hstep.
+  intros Htoken_src_not_idle Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -1615,7 +1636,7 @@ Proof.
     apply in_app_iff in Hpin as [Hold | Hnew].
     + (* old packet: source was non-Idle in gs0 *)
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Htsni pkt' Hold Hbp).
+        by exact (Htoken_src_not_idle pkt' Hold Hbp).
       destruct (node_eq (ep_src pkt') initiator) as [Heq | Hne].
       * (* source = initiator: but Hph0 says initiator was Idle, contradiction *)
         rewrite Heq in Hne_idle. exact (False_ind _ (Hne_idle Hph0)).
@@ -1660,7 +1681,7 @@ Proof.
       assert (Hself_no_token : forall q, In q (es_msgs gs0) -> ep_body q = Token ->
                                          ep_src q <> self).
       { intros q Hqin Hqb.
-        assert (H := Htsni q Hqin Hqb).
+        assert (H := Htoken_src_not_idle q Hqin Hqb).
         intro Heq. rewrite Heq in H.
         unfold proc_of in H. rewrite <- Hpeq in H. exact (H Hphase). }
       (* Determine what msgs are in gs' *)
@@ -1674,7 +1695,7 @@ Proof.
         apply in_app_iff in Hpin as [Hold | Hnew].
         -- apply remove_pkt_in in Hold.
            assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Htsni pkt' Hold Hbp).
+             by exact (Htoken_src_not_idle pkt' Hold Hbp).
            destruct (node_eq (ep_src pkt') self) as [Heq | Hne].
            ++ (* source = self: was Idle, contradicts non-Idle *)
               rewrite Heq in Hne_idle. unfold proc_of in Hne_idle. rewrite <- Hpeq in Hne_idle.
@@ -1687,7 +1708,7 @@ Proof.
         apply in_app_iff in Hpin as [Hold | Hnew].
         -- apply remove_pkt_in in Hold.
            assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Htsni pkt' Hold Hbp).
+             by exact (Htoken_src_not_idle pkt' Hold Hbp).
            destruct (node_eq (ep_src pkt') self) as [Heq | Hne].
            ++ rewrite Heq in Hne_idle. unfold proc_of in Hne_idle. rewrite <- Hpeq in Hne_idle.
               exact (False_ind _ (Hne_idle Hphase)).
@@ -1706,7 +1727,7 @@ Proof.
       apply in_app_iff in Hpin as [Hold | Hnew].
       * apply remove_pkt_in in Hold.
         assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-          by exact (Htsni pkt' Hold Hbp).
+          by exact (Htoken_src_not_idle pkt' Hold Hbp).
         unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
       * destruct Hnew as [<- | []]. simpl in Hbp. discriminate.
 
@@ -1718,7 +1739,7 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Htsni pkt' Hpin Hbp).
+        by exact (Htoken_src_not_idle pkt' Hpin Hbp).
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 
     (* ===== Echo / Idle: procs unchanged ===== *)
@@ -1729,7 +1750,7 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Htsni pkt' Hpin Hbp).
+        by exact (Htoken_src_not_idle pkt' Hpin Hbp).
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 
     (* ===== Echo / Active ===== *)
@@ -1745,7 +1766,7 @@ Proof.
            apply in_app_iff in Hpin as [Hold | Hnew].
            ++ apply remove_pkt_in in Hold.
               assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-                by exact (Htsni pkt' Hold Hbp).
+                by exact (Htoken_src_not_idle pkt' Hold Hbp).
               rewrite Hgs'eq. rewrite proc_of_upd.
               destruct (node_eq self (ep_src pkt')) as [Heq | Hne].
               ** simpl. discriminate.
@@ -1759,7 +1780,7 @@ Proof.
            rewrite Hgs'eq in Hpin. simpl in Hpin.
            apply remove_pkt_in in Hpin.
            assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Htsni pkt' Hpin Hbp).
+             by exact (Htoken_src_not_idle pkt' Hpin Hbp).
            rewrite Hgs'eq. rewrite proc_of_upd.
            destruct (node_eq self (ep_src pkt')) as [Heq | Hne].
            ++ simpl. discriminate.
@@ -1773,7 +1794,7 @@ Proof.
         rewrite Hgs'eq in Hpin. simpl in Hpin.
         apply remove_pkt_in in Hpin.
         assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-          by exact (Htsni pkt' Hpin Hbp).
+          by exact (Htoken_src_not_idle pkt' Hpin Hbp).
         rewrite Hgs'eq. rewrite proc_of_upd.
         destruct (node_eq self (ep_src pkt')) as [Heq | Hne].
         ++ simpl. discriminate.
@@ -1787,16 +1808,16 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Htsni pkt' Hpin Hbp).
+        by exact (Htoken_src_not_idle pkt' Hpin Hbp).
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 Qed.
 
 Theorem token_src_not_idle_holds : is_invariant ELts token_src_not_idle.
 Proof.
   apply invariant_by_induction.
-  - apply tsni_init.
+  - apply token_src_not_idle_base.
   - intros gs lbl gs' Hinv Hstep.
-    exact (tsni_step gs lbl gs' Hinv Hstep).
+    exact (token_src_not_idle_step gs lbl gs' Hinv Hstep).
 Qed.
 
 (* ================================================================== *)
@@ -1814,14 +1835,14 @@ Definition token_sent_or_notidle (gs : EState) : Prop :=
     (exists pkt, In pkt (es_msgs gs) /\
                  ep_src pkt = m /\ ep_dst pkt = n /\ ep_body pkt = Token).
 
-Lemma tsno_init : forall gs, lts_init ELts gs -> token_sent_or_notidle gs.
+Lemma token_sent_or_notidle_base : forall gs, lts_init ELts gs -> token_sent_or_notidle gs.
 Proof.
   intros gs [Hproc _] m n Hm Hn Hadj Hph Hpar.
   exfalso. apply Hph.
   unfold proc_of. rewrite Hproc. simpl. reflexivity.
 Qed.
 
-Lemma tsno_step gs lbl gs' :
+Lemma token_sent_or_notidle_step gs lbl gs' :
     token_sent_or_notidle gs ->
     lts_trans ELts gs lbl gs' ->
     token_sent_or_notidle gs'.
@@ -2236,9 +2257,9 @@ Qed.
 Theorem token_sent_or_notidle_holds : is_invariant ELts token_sent_or_notidle.
 Proof.
   apply invariant_by_induction.
-  - apply tsno_init.
+  - apply token_sent_or_notidle_base.
   - intros gs lbl gs' Hinv Hstep.
-    exact (tsno_step gs lbl gs' Hinv Hstep).
+    exact (token_sent_or_notidle_step gs lbl gs' Hinv Hstep).
 Qed.
 
 (* ================================================================== *)
@@ -2250,19 +2271,19 @@ Definition parent_is_active (gs : EState) : Prop :=
     forall n, (proc_of gs m).(ps_parent) = Some n ->
     (proc_of gs n).(ps_phase) = Active \/ (proc_of gs n).(ps_phase) = Decided.
 
-Lemma pia_init : forall gs, lts_init ELts gs -> parent_is_active gs.
+Lemma parent_is_active_base : forall gs, lts_init ELts gs -> parent_is_active gs.
 Proof.
   intros gs [Hproc _] m _ n Hpar.
   unfold proc_of in Hpar. rewrite Hproc in Hpar. simpl in Hpar. discriminate.
 Qed.
 
-Lemma pia_step gs lbl gs' :
+Lemma parent_is_active_step gs lbl gs' :
     parent_is_active gs ->
     token_src_not_idle gs ->
     lts_trans ELts gs lbl gs' ->
     parent_is_active gs'.
 Proof.
-  intros Hpia Htsni Hstep.
+  intros Hparent_active Htoken_src_not_idle Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -2281,7 +2302,7 @@ Proof.
       rewrite Hpar' in Hpar. discriminate.
     + (* m ≠ initiator: proc unchanged *)
       rewrite (Hother m Hnem) in Hpar.
-      destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+      destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
       * (* n was Active in gs0 *)
         destruct (node_eq n initiator) as [Heqn | Hnen].
         -- subst n. left. exact Hinit_phase.
@@ -2334,7 +2355,7 @@ Proof.
         (* Need: sender is Active or Decided *)
         (* sender sent Token(sender, self), so by token_src_not_idle, sender was non-Idle in gs0 *)
         assert (Hsender_not_idle : (proc_of gs0 sender).(ps_phase) <> Idle).
-        { exact (Htsni pkt Hin Hbody). }
+        { exact (Htoken_src_not_idle pkt Hin Hbody). }
         (* sender ≠ self: if sender = self, token_src_not_idle says self was non-Idle, contradicting Hphase *)
         assert (Hsender_ne_self : sender <> self).
         { intro Heq.
@@ -2349,7 +2370,7 @@ Proof.
         -- right. reflexivity.
       * (* m ≠ self: parent unchanged *)
         rewrite (Hother m Hnem) in Hpar.
-        destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+        destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
         -- destruct (node_eq n self) as [Heqn | Hnen].
            ++ subst n. left. exact Hself_phase.
            ++ left. rewrite (Hother n Hnen). exact Hact.
@@ -2364,7 +2385,7 @@ Proof.
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
-      destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+      destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
       * left. rewrite (Hother n). exact Hact.
       * right. rewrite (Hother n). exact Hdec.
 
@@ -2375,7 +2396,7 @@ Proof.
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
-      destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+      destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
       * left. rewrite (Hother n). exact Hact.
       * right. rewrite (Hother n). exact Hdec.
 
@@ -2386,7 +2407,7 @@ Proof.
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
-      destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+      destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
       * left. rewrite (Hother n). exact Hact.
       * right. rewrite (Hother n). exact Hdec.
 
@@ -2417,7 +2438,7 @@ Proof.
               (* Now n has been replaced by par in the goal *)
               assert (Hpar_gs0 : (proc_of gs0 self).(ps_parent) = Some par).
               { unfold proc_of. rewrite <- Hpeq. exact Hpar'. }
-              destruct (Hpia self Hm par Hpar_gs0) as [Hact | Hdec].
+              destruct (Hparent_active self Hm par Hpar_gs0) as [Hact | Hdec].
               ** (* par is Active in gs0 *)
                  left.
                  destruct (node_eq par self) as [Heqn | Hnen].
@@ -2428,7 +2449,7 @@ Proof.
                  --- subst par. left. exact Hself_phase_gs'.
                  --- right. rewrite (Hother par Hnen). exact Hdec.
            ++ rewrite (Hother m Hnem) in Hpar.
-              destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+              destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
               ** left.
                  destruct (node_eq n self) as [Heqn | Hnen].
                  --- subst n. exact Hself_phase_gs'.
@@ -2455,7 +2476,7 @@ Proof.
            destruct (node_eq m self) as [Heqm | Hnem].
            ++ subst m. rewrite Hself_par_gs' in Hpar. discriminate.
            ++ rewrite (Hother m Hnem) in Hpar.
-              destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+              destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
               ** destruct (node_eq n self) as [Heqn | Hnen].
                  --- subst n. right. exact Hself_phase_gs'.
                  --- left. rewrite (Hother n Hnen). exact Hact.
@@ -2485,7 +2506,7 @@ Proof.
         destruct (node_eq m self) as [Heqm | Hnem].
         ++ subst m.
            rewrite Hself_par_gs' in Hpar.
-           destruct (Hpia self Hm n Hpar) as [Hact | Hdec].
+           destruct (Hparent_active self Hm n Hpar) as [Hact | Hdec].
            ** left.
               destruct (node_eq n self) as [Heqn | Hnen].
               --- subst n. exact Hself_phase_gs'.
@@ -2494,7 +2515,7 @@ Proof.
               --- subst n. left. exact Hself_phase_gs'.
               --- right. rewrite (Hother n Hnen). exact Hdec.
         ++ rewrite (Hother m Hnem) in Hpar.
-           destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+           destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
            ** left.
               destruct (node_eq n self) as [Heqn | Hnen].
               --- subst n. exact Hself_phase_gs'.
@@ -2510,7 +2531,7 @@ Proof.
       assert (Hother : forall n0, proc_of gs' n0 = proc_of gs0 n0).
       { intro n0. unfold proc_of. rewrite Hgs'_procs. reflexivity. }
       rewrite (Hother m) in Hpar.
-      destruct (Hpia m Hm n Hpar) as [Hact | Hdec].
+      destruct (Hparent_active m Hm n Hpar) as [Hact | Hdec].
       * left. rewrite (Hother n). exact Hact.
       * right. rewrite (Hother n). exact Hdec.
 Qed.
@@ -2519,10 +2540,10 @@ Theorem parent_is_active_holds : is_invariant ELts parent_is_active.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => parent_is_active gs /\ token_src_not_idle gs)).
   { apply invariant_by_induction.
-    - intros gs Hi. split; [apply pia_init | apply tsni_init]; exact Hi.
-    - intros gs lbl gs' [Hpia Htsni] Hstep. split.
-      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
-      + exact (tsni_step gs lbl gs' Htsni Hstep). }
+    - intros gs Hi. split; [apply parent_is_active_base | apply token_src_not_idle_base]; exact Hi.
+    - intros gs lbl gs' [Hparent_active Htoken_src_not_idle] Hstep. split.
+      + exact (parent_is_active_step gs lbl gs' Hparent_active Htoken_src_not_idle Hstep).
+      + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -2538,7 +2559,7 @@ Definition pkt_nodes_in_all_nodes (gs : EState) : Prop :=
 Definition parent_in_all_nodes (gs : EState) : Prop :=
   forall n par, (proc_of gs n).(ps_parent) = Some par -> In par all_nodes.
 
-Lemma pnpian_init : forall gs, lts_init ELts gs ->
+Lemma pkt_nodes_in_all_nodes_base : forall gs, lts_init ELts gs ->
     pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs.
 Proof.
   intros gs [Hproc Hmsgs]. split.
@@ -2548,13 +2569,13 @@ Qed.
 
 (** Combined step: prove pkt_nodes_in_all_nodes and parent_in_all_nodes together
     so each can use the other. *)
-Lemma pnpian_step gs lbl gs' :
+Lemma pkt_nodes_in_all_nodes_step gs lbl gs' :
     pkt_nodes_in_all_nodes gs ->
     parent_in_all_nodes gs ->
     lts_trans ELts gs lbl gs' ->
     pkt_nodes_in_all_nodes gs' /\ parent_in_all_nodes gs'.
 Proof.
-  intros Hpnian Hpian Hstep.
+  intros Hpkt_in_all_nodes Hparent_in_all_nodes Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -2569,7 +2590,7 @@ Proof.
       intros pkt' Hpin'.
       unfold gs', initiator_start in Hpin'. simpl in Hpin'.
       apply in_app_iff in Hpin' as [Hold | Hnew].
-      * exact (Hpnian pkt' Hold).
+      * exact (Hpkt_in_all_nodes pkt' Hold).
       * apply send_to_all_inv in Hnew as [Hsrc [Hdst _]].
         rewrite Hsrc. split.
         -- exact initiator_in_nodes.
@@ -2578,7 +2599,7 @@ Proof.
       intros n par Hpar.
       destruct (node_eq n initiator) as [-> | Hne].
       * rewrite Hinit_par in Hpar. discriminate.
-      * rewrite (Hother n Hne) in Hpar. exact (Hpian n par Hpar).
+      * rewrite (Hother n Hne) in Hpar. exact (Hparent_in_all_nodes n par Hpar).
 
   (* ---- step_deliver ---- *)
   - subst gs0'.
@@ -2588,8 +2609,8 @@ Proof.
     set (gs'    := handle_msg node_eq all_nodes adj self gs_mid pkt).
     set (p      := gs_mid.(es_procs) self).
     assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
-    assert (Hsender_in : In sender all_nodes) by exact (proj1 (Hpnian pkt Hin)).
-    assert (Hself_in   : In self   all_nodes) by exact (proj2 (Hpnian pkt Hin)).
+    assert (Hsender_in : In sender all_nodes) by exact (proj1 (Hpkt_in_all_nodes pkt Hin)).
+    assert (Hself_in   : In self   all_nodes) by exact (proj2 (Hpkt_in_all_nodes pkt Hin)).
     destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
 
     (* ===== Token / Idle ===== *)
@@ -2617,10 +2638,10 @@ Proof.
                             (nbrs all_nodes adj self)) in *.
         destruct (Nat.eqb (length fwds) 0) eqn:Hleaf; simpl in Hpin'.
         -- apply in_app_iff in Hpin' as [Hold | Hnew].
-           ++ exact (Hpnian pkt' (remove_pkt_in _ _ _ Hold)).
+           ++ exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hold)).
            ++ destruct Hnew as [<- | []]. simpl. exact (conj Hself_in Hsender_in).
         -- apply in_app_iff in Hpin' as [Hold | Hnew].
-           ++ exact (Hpnian pkt' (remove_pkt_in _ _ _ Hold)).
+           ++ exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hold)).
            ++ apply send_to_all_inv in Hnew as [Hsrc [Hdst _]].
               rewrite Hsrc. split.
               ** exact Hself_in.
@@ -2629,7 +2650,7 @@ Proof.
         intros n par Hpar.
         destruct (node_eq n self) as [-> | Hne].
         -- rewrite Hself_par in Hpar. injection Hpar as <-. exact Hsender_in.
-        -- rewrite (Hother n Hne) in Hpar. exact (Hpian n par Hpar).
+        -- rewrite (Hother n Hne) in Hpar. exact (Hparent_in_all_nodes n par Hpar).
 
     (* ===== Token / Active: msgs = old ++ [Echo(self,sender)]; procs unchanged ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -2641,9 +2662,9 @@ Proof.
       split.
       * intros pkt' Hpin'. rewrite Hgs'_msgs in Hpin'.
         apply in_app_iff in Hpin' as [Hold | Hnew].
-        -- exact (Hpnian pkt' (remove_pkt_in _ _ _ Hold)).
+        -- exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hold)).
         -- destruct Hnew as [<- | []]. simpl. exact (conj Hself_in Hsender_in).
-      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hpian n par Hpar).
+      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hparent_in_all_nodes n par Hpar).
 
     (* ===== Token/Decided: procs unchanged, msgs shrink ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -2654,8 +2675,8 @@ Proof.
         rewrite Hbody, Hphase. reflexivity. }
       split.
       * intros pkt' Hpin'. rewrite Hgs'_msgs in Hpin'.
-        exact (Hpnian pkt' (remove_pkt_in _ _ _ Hpin')).
-      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hpian n par Hpar).
+        exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hpin')).
+      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hparent_in_all_nodes n par Hpar).
 
     (* ===== Echo/Idle: procs unchanged, msgs shrink ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -2666,8 +2687,8 @@ Proof.
         rewrite Hbody, Hphase. reflexivity. }
       split.
       * intros pkt' Hpin'. rewrite Hgs'_msgs in Hpin'.
-        exact (Hpnian pkt' (remove_pkt_in _ _ _ Hpin')).
-      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hpian n par Hpar).
+        exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hpin')).
+      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hparent_in_all_nodes n par Hpar).
 
     (* ===== Echo / Active ===== *)
     + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -2679,9 +2700,9 @@ Proof.
                                                (es_msgs gs_mid ++ [mkPkt self par0 Echo])).
            { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
              rewrite Hbody, Hphase, Hone, Hpar0. unfold new_p. rewrite Hpeq. reflexivity. }
-           (* par0 ∈ all_nodes: from parent_in_all_nodes (Hpian) applied to (self, par0) *)
+           (* par0 ∈ all_nodes: from parent_in_all_nodes (Hparent_in_all_nodes) applied to (self, par0) *)
            assert (Hpar0_in : In par0 all_nodes).
-           { apply (Hpian self par0). unfold proc_of. rewrite Hpeq in Hpar0. exact Hpar0. }
+           { apply (Hparent_in_all_nodes self par0). unfold proc_of. rewrite Hpeq in Hpar0. exact Hpar0. }
            assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent)).
            { intros n. rewrite Hgs'eq. rewrite proc_of_upd.
              destruct (node_eq self n) as [Heq | Hne].
@@ -2691,11 +2712,11 @@ Proof.
            ++ (* pkt_nodes_in_all_nodes gs' *)
               intros pkt' Hpin'. rewrite Hgs'eq in Hpin'. simpl in Hpin'.
               apply in_app_iff in Hpin' as [Hold | Hnew].
-              ** exact (Hpnian pkt' (remove_pkt_in _ _ _ Hold)).
+              ** exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hold)).
               ** destruct Hnew as [<- | []]. simpl. exact (conj Hself_in Hpar0_in).
            ++ (* parent_in_all_nodes gs' *)
               intros n par Hpar.
-              rewrite (Hagree n) in Hpar. exact (Hpian n par Hpar).
+              rewrite (Hagree n) in Hpar. exact (Hparent_in_all_nodes n par Hpar).
         -- (* pending=1, parent=None: initiator decides *)
            set (decided := mkProc Decided None 0 (ep_src pkt :: ps_children p)).
            assert (Hgs'eq : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self decided)
@@ -2709,8 +2730,8 @@ Proof.
              - unfold proc_of. reflexivity. }
            split.
            ++ intros pkt' Hpin'. rewrite Hgs'eq in Hpin'. simpl in Hpin'.
-              exact (Hpnian pkt' (remove_pkt_in _ _ _ Hpin')).
-           ++ intros n par Hpar. rewrite (Hagree n) in Hpar. exact (Hpian n par Hpar).
+              exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hpin')).
+           ++ intros n par Hpar. rewrite (Hagree n) in Hpar. exact (Hparent_in_all_nodes n par Hpar).
       * (* pending ≠ 1: no new msgs *)
         set (new_p := mkProc Active (ps_parent p) (Nat.pred (ps_pending p))
                               (ep_src pkt :: ps_children p)).
@@ -2725,8 +2746,8 @@ Proof.
           - unfold proc_of. reflexivity. }
         split.
         -- intros pkt' Hpin'. rewrite Hgs'eq in Hpin'. simpl in Hpin'.
-           exact (Hpnian pkt' (remove_pkt_in _ _ _ Hpin')).
-        -- intros n par Hpar. rewrite (Hagree n) in Hpar. exact (Hpian n par Hpar).
+           exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hpin')).
+        -- intros n par Hpar. rewrite (Hagree n) in Hpar. exact (Hparent_in_all_nodes n par Hpar).
 
     (* ===== Echo/Decided: procs unchanged, msgs shrink ===== *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -2737,17 +2758,17 @@ Proof.
         rewrite Hbody, Hphase. reflexivity. }
       split.
       * intros pkt' Hpin'. rewrite Hgs'_msgs in Hpin'.
-        exact (Hpnian pkt' (remove_pkt_in _ _ _ Hpin')).
-      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hpian n par Hpar).
+        exact (Hpkt_in_all_nodes pkt' (remove_pkt_in _ _ _ Hpin')).
+      * intros n par Hpar. unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hparent_in_all_nodes n par Hpar).
 Qed.
 
 Theorem pkt_nodes_in_all_nodes_holds : is_invariant ELts pkt_nodes_in_all_nodes.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs)).
   { apply invariant_by_induction.
-    - intro gs. exact (pnpian_init gs).
-    - intros gs lbl gs' [Hpnian Hpian] Hstep.
-      exact (pnpian_step gs lbl gs' Hpnian Hpian Hstep). }
+    - intro gs. exact (pkt_nodes_in_all_nodes_base gs).
+    - intros gs lbl gs' [Hpkt_in_all_nodes Hparent_in_all_nodes] Hstep.
+      exact (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -2755,9 +2776,9 @@ Theorem parent_in_all_nodes_holds : is_invariant ELts parent_in_all_nodes.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs)).
   { apply invariant_by_induction.
-    - intro gs. exact (pnpian_init gs).
-    - intros gs lbl gs' [Hpnian Hpian] Hstep.
-      exact (pnpian_step gs lbl gs' Hpnian Hpian Hstep). }
+    - intro gs. exact (pkt_nodes_in_all_nodes_base gs).
+    - intros gs lbl gs' [Hpkt_in_all_nodes Hparent_in_all_nodes] Hstep.
+      exact (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep). }
   intros gs Hr. exact (proj2 (Hcomb gs Hr)).
 Qed.
 
@@ -2769,13 +2790,13 @@ Definition no_mutual_parent_prop (gs : EState) : Prop :=
     (proc_of gs m).(ps_parent) = Some par ->
     (proc_of gs par).(ps_parent) <> Some m.
 
-Lemma nmp_init : forall gs, lts_init ELts gs -> no_mutual_parent_prop gs.
+Lemma no_mutual_parent_base : forall gs, lts_init ELts gs -> no_mutual_parent_prop gs.
 Proof.
   intros gs [Hproc _] m par Hpar.
   unfold proc_of in Hpar. rewrite Hproc in Hpar. simpl in Hpar. discriminate.
 Qed.
 
-Lemma nmp_step gs lbl gs' :
+Lemma no_mutual_parent_step gs lbl gs' :
     no_mutual_parent_prop gs ->
     parent_is_active gs ->
     pkt_nodes_in_all_nodes gs ->
@@ -2783,7 +2804,7 @@ Lemma nmp_step gs lbl gs' :
     lts_trans ELts gs lbl gs' ->
     no_mutual_parent_prop gs'.
 Proof.
-  intros Hnmp Hpia Hpnian Hvpkt Hstep.
+  intros Hno_mutual_parent Hparent_active Hpkt_in_all_nodes Hvpkt Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -2800,7 +2821,7 @@ Proof.
       destruct (node_eq par initiator) as [Heqp | Hnep].
       * subst par. rewrite Hinit_par in Hcontra. discriminate.
       * rewrite (Hother par Hnep) in Hcontra.
-        exact (Hnmp m par Hpar Hcontra).
+        exact (Hno_mutual_parent m par Hpar Hcontra).
 
   (* ---- step_deliver ---- *)
   - subst gs0'.
@@ -2810,7 +2831,7 @@ Proof.
     set (gs'    := handle_msg node_eq all_nodes adj self gs_mid pkt).
     set (p      := gs_mid.(es_procs) self).
     assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
-    assert (Hsender_in : In sender all_nodes) by exact (proj1 (Hpnian pkt Hin)).
+    assert (Hsender_in : In sender all_nodes) by exact (proj1 (Hpkt_in_all_nodes pkt Hin)).
     intros m par Hpar Hcontra.
     destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
 
@@ -2840,7 +2861,7 @@ Proof.
             unfold self in *. rewrite Hseq in Hv. exact Hv. }
           rewrite adj_irrefl in Hadj_ss. discriminate. }
         rewrite (Hother sender Hsne) in Hcontra.
-        destruct (Hpia sender Hsender_in self Hcontra) as [Hact | Hdec].
+        destruct (Hparent_active sender Hsender_in self Hcontra) as [Hact | Hdec].
         { unfold proc_of in Hact. rewrite <- Hpeq in Hact. rewrite Hphase in Hact. discriminate. }
         { unfold proc_of in Hdec. rewrite <- Hpeq in Hdec. rewrite Hphase in Hdec. discriminate. }
       * rewrite (Hother m Hnem) in Hpar.
@@ -2848,30 +2869,30 @@ Proof.
         { (* par = self: Hpar says parent(gs0 m) = Some self;
              Hcontra says parent(gs' self) = Some m;
              Hself_par says parent(gs' self) = Some sender;
-             so sender = m; then Hpia m gives phase(gs0 self) Active/Decided,
+             so sender = m; then Hparent_active m gives phase(gs0 self) Active/Decided,
              contradicting Hphase : phase(gs0 self) = Idle *)
           subst par. rewrite Hself_par in Hcontra. injection Hcontra as Hmend.
           (* Hmend : sender = m; rewrite in Hpar *)
           rewrite <- Hmend in Hpar.
-          destruct (Hpia sender Hsender_in self Hpar) as [Hact | Hdec].
+          destruct (Hparent_active sender Hsender_in self Hpar) as [Hact | Hdec].
           - unfold proc_of in Hact. rewrite <- Hpeq in Hact. rewrite Hphase in Hact. discriminate.
           - unfold proc_of in Hdec. rewrite <- Hpeq in Hdec. rewrite Hphase in Hdec. discriminate. }
         { rewrite (Hother par Hnep) in Hcontra.
-          exact (Hnmp m par Hpar Hcontra). }
+          exact (Hno_mutual_parent m par Hpar Hcontra). }
 
     (* Token/Active, Token/Decided, Echo/Idle, Echo/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hnmp m par Hpar Hcontra).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hnmp m par Hpar Hcontra).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hnmp m par Hpar Hcontra).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
 
     (* Echo / Active: parent pointers agree with pre-state *)
     + assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent)).
@@ -2908,12 +2929,12 @@ Proof.
           + subst n. simpl. unfold proc_of. reflexivity.
           + unfold proc_of. reflexivity. }
       rewrite (Hagree m) in Hpar. rewrite (Hagree par) in Hcontra.
-      exact (Hnmp m par Hpar Hcontra).
+      exact (Hno_mutual_parent m par Hpar Hcontra).
 
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hnmp m par Hpar Hcontra).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hno_mutual_parent m par Hpar Hcontra).
 Qed.
 
 Theorem no_mutual_parent_holds : is_invariant ELts no_mutual_parent_prop.
@@ -2924,16 +2945,16 @@ Proof.
                token_src_not_idle gs /\ INV gs)).
   { apply invariant_by_induction.
     - intros gs Hi.
-      refine (conj (nmp_init gs Hi) (conj (pia_init gs Hi) (conj _ (conj _ (conj (tsni_init gs Hi) (INV_init gs Hi)))))).
-      + exact (proj1 (pnpian_init gs Hi)).
-      + exact (proj2 (pnpian_init gs Hi)).
-    - intros gs lbl gs' [Hnmp [Hpia [Hpnian [Hpian [Htsni Hinv]]]]] Hstep.
+      refine (conj (no_mutual_parent_base gs Hi) (conj (parent_is_active_base gs Hi) (conj _ (conj _ (conj (token_src_not_idle_base gs Hi) (INV_init gs Hi)))))).
+      + exact (proj1 (pkt_nodes_in_all_nodes_base gs Hi)).
+      + exact (proj2 (pkt_nodes_in_all_nodes_base gs Hi)).
+    - intros gs lbl gs' [Hno_mutual_parent [Hparent_active [Hpkt_in_all_nodes [Hparent_in_all_nodes [Htoken_src_not_idle Hinv]]]]] Hstep.
       refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
-      + exact (nmp_step gs lbl gs' Hnmp Hpia Hpnian (proj1 (proj2 (proj2 Hinv))) Hstep).
-      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
-      + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-      + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-      + exact (tsni_step gs lbl gs' Htsni Hstep).
+      + exact (no_mutual_parent_step gs lbl gs' Hno_mutual_parent Hparent_active Hpkt_in_all_nodes (proj1 (proj2 (proj2 Hinv))) Hstep).
+      + exact (parent_is_active_step gs lbl gs' Hparent_active Htoken_src_not_idle Hstep).
+      + exact (proj1 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+      + exact (proj2 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+      + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep).
       + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hin Heq].
         * exact (INV_step_start gs0 Hinv Hph).
         * exact (INV_step_deliver gs0 pkt gs0' Hinv Hin Heq). }
@@ -2941,7 +2962,12 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** ** Invariants supporting no_token_idle_decided *)
+(** ** §8. Pending-chain argument: no Token reaches an Idle node when decided
+
+    Strategy: maintain a battery of state invariants about Tokens, Echoes, children
+    lists, and pending counts.  Together they let us prove that Token(m→n) in the
+    bag ∧ n Idle ⟹ pending(m) >= 1 ⟹ (up the parent chain) ⟹ pending(initiator) >= 1
+    ⟹ initiator cannot yet be Decided — contradiction. *)
 
 (* ------------------------------------------------------------------ *)
 (** *** echo_src_not_idle: Echo senders are never Idle. *)
@@ -2950,18 +2976,18 @@ Definition echo_src_not_idle (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
     (proc_of gs (ep_src pkt)).(ps_phase) <> Idle.
 
-Lemma esni_init : forall gs, lts_init ELts gs -> echo_src_not_idle gs.
+Lemma echo_src_not_idle_base : forall gs, lts_init ELts gs -> echo_src_not_idle gs.
 Proof.
   intros gs [_ Hmsgs] pkt Hin _.
   rewrite Hmsgs in Hin. contradiction.
 Qed.
 
-Lemma esni_step gs lbl gs' :
+Lemma echo_src_not_idle_step gs lbl gs' :
     echo_src_not_idle gs ->
     lts_trans ELts gs lbl gs' ->
     echo_src_not_idle gs'.
 Proof.
-  intros Hesni Hstep.
+  intros Hecho_src_not_idle Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -2976,7 +3002,7 @@ Proof.
     apply in_app_iff in Hpin as [Hold | Hnew].
     + (* old packet *)
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Hesni pkt' Hold Hbp).
+        by exact (Hecho_src_not_idle pkt' Hold Hbp).
       destruct (node_eq (ep_src pkt') initiator) as [Heq | Hne].
       * rewrite Heq in Hne_idle. exact (False_ind _ (Hne_idle Hph0)).
       * rewrite (Hother _ Hne). exact Hne_idle.
@@ -3018,7 +3044,7 @@ Proof.
       * apply in_app_iff in Hpin as [Hold | Hnew].
         -- apply remove_pkt_in in Hold.
            assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Hesni pkt' Hold Hbp).
+             by exact (Hecho_src_not_idle pkt' Hold Hbp).
            destruct (node_eq (ep_src pkt') self) as [Heq | Hne].
            ++ rewrite Heq in Hne_idle. unfold proc_of in Hne_idle.
               rewrite <- Hpeq in Hne_idle. exact (False_ind _ (Hne_idle Hphase)).
@@ -3028,7 +3054,7 @@ Proof.
       * apply in_app_iff in Hpin as [Hold | Hnew].
         -- apply remove_pkt_in in Hold.
            assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Hesni pkt' Hold Hbp).
+             by exact (Hecho_src_not_idle pkt' Hold Hbp).
            destruct (node_eq (ep_src pkt') self) as [Heq | Hne].
            ++ rewrite Heq in Hne_idle. unfold proc_of in Hne_idle.
               rewrite <- Hpeq in Hne_idle. exact (False_ind _ (Hne_idle Hphase)).
@@ -3048,7 +3074,7 @@ Proof.
       apply in_app_iff in Hpin as [Hold | Hnew].
       * apply remove_pkt_in in Hold.
         assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-          by exact (Hesni pkt' Hold Hbp).
+          by exact (Hecho_src_not_idle pkt' Hold Hbp).
         unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
       * destruct Hnew as [<- | []]. simpl ep_src.
         unfold proc_of. rewrite Hgs'_procs. rewrite <- Hpeq. rewrite Hphase. discriminate.
@@ -3061,7 +3087,7 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Hesni pkt' Hpin Hbp).
+        by exact (Hecho_src_not_idle pkt' Hpin Hbp).
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 
     (* Echo/Idle: procs unchanged *)
@@ -3072,7 +3098,7 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Hesni pkt' Hpin Hbp).
+        by exact (Hecho_src_not_idle pkt' Hpin Hbp).
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 
     (* Echo/Active *)
@@ -3088,7 +3114,7 @@ Proof.
            apply in_app_iff in Hpin as [Hold | Hnew].
            ++ apply remove_pkt_in in Hold.
               assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-                by exact (Hesni pkt' Hold Hbp).
+                by exact (Hecho_src_not_idle pkt' Hold Hbp).
               rewrite Hgs'eq. rewrite proc_of_upd.
               destruct (node_eq self (ep_src pkt')) as [Heq | Hne].
               ** simpl. discriminate.
@@ -3105,7 +3131,7 @@ Proof.
            rewrite Hgs'eq in Hpin. simpl in Hpin.
            apply remove_pkt_in in Hpin.
            assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Hesni pkt' Hpin Hbp).
+             by exact (Hecho_src_not_idle pkt' Hpin Hbp).
            rewrite Hgs'eq. rewrite proc_of_upd.
            destruct (node_eq self (ep_src pkt')) as [Heq | Hne].
            ++ simpl. discriminate.
@@ -3119,7 +3145,7 @@ Proof.
         rewrite Hgs'eq in Hpin. simpl in Hpin.
         apply remove_pkt_in in Hpin.
         assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-          by exact (Hesni pkt' Hpin Hbp).
+          by exact (Hecho_src_not_idle pkt' Hpin Hbp).
         rewrite Hgs'eq. rewrite proc_of_upd.
         destruct (node_eq self (ep_src pkt')) as [Heq | Hne].
         ++ simpl. discriminate.
@@ -3133,16 +3159,16 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       assert (Hne_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-        by exact (Hesni pkt' Hpin Hbp).
+        by exact (Hecho_src_not_idle pkt' Hpin Hbp).
       unfold proc_of in *. rewrite Hgs'_procs. exact Hne_idle.
 Qed.
 
 Theorem echo_src_not_idle_holds : is_invariant ELts echo_src_not_idle.
 Proof.
   apply invariant_by_induction.
-  - apply esni_init.
+  - apply echo_src_not_idle_base.
   - intros gs lbl gs' Hinv Hstep.
-    exact (esni_step gs lbl gs' Hinv Hstep).
+    exact (echo_src_not_idle_step gs lbl gs' Hinv Hstep).
 Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -3153,20 +3179,20 @@ Definition idle_not_in_children (gs : EState) : Prop :=
     (proc_of gs n).(ps_phase) = Idle ->
     ~ In n (proc_of gs m).(ps_children).
 
-Lemma inic_init : forall gs, lts_init ELts gs -> idle_not_in_children gs.
+Lemma idle_not_in_children_base : forall gs, lts_init ELts gs -> idle_not_in_children gs.
 Proof.
   intros gs [Hproc _] m n _ Hin.
   unfold proc_of in Hin. rewrite Hproc in Hin. simpl in Hin. contradiction.
 Qed.
 
-Lemma inic_step gs lbl gs' :
+Lemma idle_not_in_children_step gs lbl gs' :
     idle_not_in_children gs ->
     token_src_not_idle gs ->
     echo_src_not_idle gs ->
     lts_trans ELts gs lbl gs' ->
     idle_not_in_children gs'.
 Proof.
-  intros Hinic Htsni Hesni Hstep.
+  intros Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -3185,7 +3211,7 @@ Proof.
       destruct (node_eq n initiator) as [-> | Hnen].
       * rewrite Hinit_active in Hn_idle. discriminate.
       * rewrite (Hother n Hnen) in Hn_idle.
-        exact (Hinic m n Hn_idle Hin_child).
+        exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
   (* ---- step_deliver ---- *)
   - subst gs0'.
@@ -3226,30 +3252,30 @@ Proof.
         destruct (node_eq n self) as [-> | Hnen].
         -- rewrite Hself_active in Hn_idle. discriminate.
         -- rewrite (Hother n Hnen) in Hn_idle.
-           exact (Hinic m n Hn_idle Hin_child).
+           exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
     (* Token/Active: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinic m n Hn_idle Hin_child).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
     (* Token/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinic m n Hn_idle Hin_child).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
     (* Echo/Idle: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinic m n Hn_idle Hin_child).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 
     (* Echo/Active: sender added to children(self) *)
     + (* The key case: sender is the echo sender; sender was Active (non-Idle) *)
       assert (Hsender_not_idle : (proc_of gs0 sender).(ps_phase) <> Idle).
-      { exact (Hesni pkt Hin Hbody). }
+      { exact (Hecho_src_not_idle pkt Hin Hbody). }
       destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
       * destruct (ps_parent p) as [par0 |] eqn:Hpar0.
         -- (* pending=1, parent=Some par0 *)
@@ -3276,12 +3302,12 @@ Proof.
               simpl in Hin_child. unfold new_p in Hin_child. simpl in Hin_child.
               destruct Hin_child as [<- | Hrest].
               ** exact (Hsender_not_idle Hn_idle0).
-              ** exact (Hinic self n Hn_idle0 Hrest).
+              ** exact (Hidle_not_in_children self n Hn_idle0 Hrest).
            ++ rewrite Hgs'eq in Hin_child. rewrite proc_of_upd in Hin_child.
               destruct (node_eq self m) as [Heq | _].
               ** exact (False_ind _ (Hne (eq_sym Heq))).
               ** unfold proc_of in *. simpl in Hin_child.
-                 exact (Hinic m n Hn_idle0 Hin_child).
+                 exact (Hidle_not_in_children m n Hn_idle0 Hin_child).
         -- (* pending=1, parent=None: initiator decides *)
            set (decided := mkProc Decided None 0 (sender :: ps_children p)).
            assert (Hgs'eq : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self decided)
@@ -3303,12 +3329,12 @@ Proof.
               simpl in Hin_child. unfold decided in Hin_child. simpl in Hin_child.
               destruct Hin_child as [<- | Hrest].
               ** exact (Hsender_not_idle Hn_idle0).
-              ** exact (Hinic self n Hn_idle0 Hrest).
+              ** exact (Hidle_not_in_children self n Hn_idle0 Hrest).
            ++ rewrite Hgs'eq in Hin_child. rewrite proc_of_upd in Hin_child.
               destruct (node_eq self m) as [Heq | _].
               ** exact (False_ind _ (Hne (eq_sym Heq))).
               ** unfold proc_of in *. simpl in Hin_child.
-                 exact (Hinic m n Hn_idle0 Hin_child).
+                 exact (Hidle_not_in_children m n Hn_idle0 Hin_child).
       * (* pending ≠ 1 *)
         set (new_p := mkProc Active (ps_parent p) (Nat.pred (ps_pending p))
                               (sender :: ps_children p)).
@@ -3331,18 +3357,18 @@ Proof.
            simpl in Hin_child. unfold new_p in Hin_child. simpl in Hin_child.
            destruct Hin_child as [<- | Hrest].
            ** exact (Hsender_not_idle Hn_idle0).
-           ** exact (Hinic self n Hn_idle0 Hrest).
+           ** exact (Hidle_not_in_children self n Hn_idle0 Hrest).
         ++ rewrite Hgs'eq in Hin_child. rewrite proc_of_upd in Hin_child.
            destruct (node_eq self m) as [Heq | _].
            ** exact (False_ind _ (Hne (eq_sym Heq))).
            ** unfold proc_of in *. simpl in Hin_child.
-              exact (Hinic m n Hn_idle0 Hin_child).
+              exact (Hidle_not_in_children m n Hn_idle0 Hin_child).
 
     (* Echo/Decided: procs unchanged *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
       { unfold gs'. unfold handle_msg. change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. reflexivity. }
-      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hinic m n Hn_idle Hin_child).
+      unfold proc_of in *. rewrite Hgs'_procs in *. exact (Hidle_not_in_children m n Hn_idle Hin_child).
 Qed.
 
 Theorem idle_not_in_children_holds : is_invariant ELts idle_not_in_children.
@@ -3350,14 +3376,14 @@ Proof.
   assert (Hcomb : is_invariant ELts
     (fun gs => idle_not_in_children gs /\ token_src_not_idle gs /\ echo_src_not_idle gs)).
   { apply invariant_by_induction.
-    - intros gs Hi. refine (conj (inic_init gs Hi) (conj _ _)).
-      + apply tsni_init. exact Hi.
-      + apply esni_init. exact Hi.
-    - intros gs lbl gs' [Hinic [Htsni Hesni]] Hstep.
+    - intros gs Hi. refine (conj (idle_not_in_children_base gs Hi) (conj _ _)).
+      + apply token_src_not_idle_base. exact Hi.
+      + apply echo_src_not_idle_base. exact Hi.
+    - intros gs lbl gs' [Hidle_not_in_children [Htoken_src_not_idle Hecho_src_not_idle]] Hstep.
       refine (conj _ (conj _ _)).
-      + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
-      + exact (tsni_step gs lbl gs' Htsni Hstep).
-      + exact (esni_step gs lbl gs' Hesni Hstep). }
+      + exact (idle_not_in_children_step gs lbl gs' Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hstep).
+      + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep).
+      + exact (echo_src_not_idle_step gs lbl gs' Hecho_src_not_idle Hstep). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -3370,19 +3396,19 @@ Definition token_dst_not_parent (gs : EState) : Prop :=
     In pkt (es_msgs gs) -> ep_body pkt = Token ->
     (proc_of gs (ep_src pkt)).(ps_parent) <> Some (ep_dst pkt).
 
-Lemma tdnp_init : forall gs, lts_init ELts gs -> token_dst_not_parent gs.
+Lemma token_dst_not_parent_base : forall gs, lts_init ELts gs -> token_dst_not_parent gs.
 Proof.
   intros gs [_ Hmsgs] pkt Hin _.
   rewrite Hmsgs in Hin. contradiction.
 Qed.
 
-Lemma tdnp_step gs lbl gs' :
+Lemma token_dst_not_parent_step gs lbl gs' :
     token_dst_not_parent gs ->
     token_src_not_idle gs ->
     lts_trans ELts gs lbl gs' ->
     token_dst_not_parent gs'.
 Proof.
-  intros Htdnp Htsni Hstep.
+  intros Htoken_dst_not_parent Htoken_src_not_idle Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -3396,7 +3422,7 @@ Proof.
     unfold gs', initiator_start in Hpin. simpl in Hpin.
     apply in_app_iff in Hpin as [Hold | Hnew].
     + (* old packet *)
-      assert (Hne_par := Htdnp pkt' Hold Hbp).
+      assert (Hne_par := Htoken_dst_not_parent pkt' Hold Hbp).
       destruct (node_eq (ep_src pkt') initiator) as [-> | Hne].
       * rewrite Hinit_par. discriminate.
       * rewrite (Hother _ Hne). exact Hne_par.
@@ -3440,25 +3466,25 @@ Proof.
         -- apply remove_pkt_in in Hold.
            (* pkt' is a Token in old bag *)
            assert (Hsrc_not_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Htsni pkt' Hold Hbp).
+             by exact (Htoken_src_not_idle pkt' Hold Hbp).
            destruct (node_eq (ep_src pkt') self) as [Heq_src | Hne].
            ++ (* ep_src pkt' = self which was Idle → contradiction *)
               rewrite Heq_src in Hsrc_not_idle.
               unfold proc_of in Hsrc_not_idle. rewrite <- Hpeq in Hsrc_not_idle.
               exact (False_ind _ (Hsrc_not_idle Hphase)).
-           ++ rewrite (Hother _ Hne). exact (Htdnp pkt' Hold Hbp).
+           ++ rewrite (Hother _ Hne). exact (Htoken_dst_not_parent pkt' Hold Hbp).
         -- destruct Hnew as [<- | []]. simpl in Hbp. discriminate.
       * (* internal: msgs = remove_pkt bag ++ send_to_all self fwds Token *)
         apply in_app_iff in Hpin as [Hold | Hnew].
         -- apply remove_pkt_in in Hold.
            assert (Hsrc_not_idle : (proc_of gs0 (ep_src pkt')).(ps_phase) <> Idle)
-             by exact (Htsni pkt' Hold Hbp).
+             by exact (Htoken_src_not_idle pkt' Hold Hbp).
            destruct (node_eq (ep_src pkt') self) as [Heq_src | Hne].
            ++ (* ep_src pkt' = self which was Idle → contradiction *)
               rewrite Heq_src in Hsrc_not_idle.
               unfold proc_of in Hsrc_not_idle. rewrite <- Hpeq in Hsrc_not_idle.
               exact (False_ind _ (Hsrc_not_idle Hphase)).
-           ++ rewrite (Hother _ Hne). exact (Htdnp pkt' Hold Hbp).
+           ++ rewrite (Hother _ Hne). exact (Htoken_dst_not_parent pkt' Hold Hbp).
         -- apply send_to_all_inv in Hnew as [Hsrc [Hdst _]].
            (* pkt' = Token(self, dst) where dst ∈ fwds *)
            (* Need: parent(gs' self) ≠ Some dst *)
@@ -3487,7 +3513,7 @@ Proof.
         rewrite Hbody, Hphase. reflexivity. }
       rewrite Hgs'_msgs in Hpin. apply in_app_iff in Hpin as [Hold | Hnew].
       * unfold proc_of in *. rewrite Hgs'_procs.
-        exact (Htdnp pkt' (remove_pkt_in _ _ _ Hold) Hbp).
+        exact (Htoken_dst_not_parent pkt' (remove_pkt_in _ _ _ Hold) Hbp).
       * destruct Hnew as [<- | []]. simpl in Hbp. discriminate.
 
     (* Token/Decided: procs unchanged, msgs shrink (= remove_pkt) *)
@@ -3500,7 +3526,7 @@ Proof.
       rewrite Hgs'_msgs in Hpin.
       assert (Hold : In pkt' (es_msgs gs0)) by exact (remove_pkt_in _ _ _ Hpin).
       unfold proc_of in *. rewrite Hgs'_procs.
-      exact (Htdnp pkt' Hold Hbp).
+      exact (Htoken_dst_not_parent pkt' Hold Hbp).
 
     (* Echo/Idle: procs unchanged, msgs shrink (= remove_pkt) *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -3512,7 +3538,7 @@ Proof.
       rewrite Hgs'_msgs in Hpin.
       assert (Hold : In pkt' (es_msgs gs0)) by exact (remove_pkt_in _ _ _ Hpin).
       unfold proc_of in *. rewrite Hgs'_procs.
-      exact (Htdnp pkt' Hold Hbp).
+      exact (Htoken_dst_not_parent pkt' Hold Hbp).
 
     (* Echo/Active: parent pointers agree; msgs may add Echo or shrink *)
     + assert (Hagree : forall n, (proc_of gs' n).(ps_parent) = (proc_of gs0 n).(ps_parent)).
@@ -3567,7 +3593,7 @@ Proof.
             rewrite Hbody, Hphase, Hone. rewrite Hpeq. reflexivity. }
           rewrite Hgs'eq_msgs in Hpin. exact Hpin. }
       rewrite (Hagree (ep_src pkt')).
-      exact (Htdnp pkt' (remove_pkt_in _ _ _ Htoken_in_mid) Hbp).
+      exact (Htoken_dst_not_parent pkt' (remove_pkt_in _ _ _ Htoken_in_mid) Hbp).
 
     (* Echo/Decided: procs unchanged, msgs = remove_pkt *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -3579,17 +3605,17 @@ Proof.
       rewrite Hgs'_msgs in Hpin.
       assert (Hold : In pkt' (es_msgs gs0)) by exact (remove_pkt_in _ _ _ Hpin).
       unfold proc_of in *. rewrite Hgs'_procs.
-      exact (Htdnp pkt' Hold Hbp).
+      exact (Htoken_dst_not_parent pkt' Hold Hbp).
 Qed.
 
 Theorem token_dst_not_parent_holds : is_invariant ELts token_dst_not_parent.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => token_dst_not_parent gs /\ token_src_not_idle gs)).
   { apply invariant_by_induction.
-    - intros gs Hi. split; [apply tdnp_init | apply tsni_init]; exact Hi.
-    - intros gs lbl gs' [Htdnp Htsni] Hstep. split.
-      + exact (tdnp_step gs lbl gs' Htdnp Htsni Hstep).
-      + exact (tsni_step gs lbl gs' Htsni Hstep). }
+    - intros gs Hi. split; [apply token_dst_not_parent_base | apply token_src_not_idle_base]; exact Hi.
+    - intros gs lbl gs' [Htoken_dst_not_parent Htoken_src_not_idle] Hstep. split.
+      + exact (token_dst_not_parent_step gs lbl gs' Htoken_dst_not_parent Htoken_src_not_idle Hstep).
+      + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -3659,13 +3685,13 @@ Definition decided_pending_zero (gs : EState) : Prop :=
   forall n, (proc_of gs n).(ps_phase) = Decided ->
             (proc_of gs n).(ps_pending) = 0.
 
-Lemma dpz_init : forall gs, lts_init ELts gs -> decided_pending_zero gs.
+Lemma decided_pending_zero_base : forall gs, lts_init ELts gs -> decided_pending_zero gs.
 Proof.
   intros gs [Hproc _] n Hph.
   unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
 Qed.
 
-Lemma dpz_step gs lbl gs' :
+Lemma decided_pending_zero_step gs lbl gs' :
     decided_pending_zero gs ->
     lts_trans ELts gs lbl gs' ->
     decided_pending_zero gs'.
@@ -3788,9 +3814,9 @@ Qed.
 Theorem decided_pending_zero_holds : is_invariant ELts decided_pending_zero.
 Proof.
   apply invariant_by_induction.
-  - apply dpz_init.
+  - apply decided_pending_zero_base.
   - intros gs lbl gs' Hdpz Hstep.
-    exact (dpz_step gs lbl gs' Hdpz Hstep).
+    exact (decided_pending_zero_step gs lbl gs' Hdpz Hstep).
 Qed.
 
 (* ------------------------------------------------------------------ *)
@@ -4142,14 +4168,14 @@ Proof.
 Qed.
 
 (** Key consequence: if Token pkt is in bag and tamo holds, then removing pkt leaves pkt out. *)
-Lemma tamo_remove_not_in (gs : EState) (pkt : @echo_packet node) :
+Lemma token_at_most_once_remove_not_in (gs : EState) (pkt : @echo_packet node) :
     token_at_most_once gs ->
     ep_body pkt = Token ->
     In pkt (es_msgs gs) ->
     ~ In pkt (remove_pkt node_eq pkt (es_msgs gs)).
 Proof.
-  intros Htamo Hbody Hin Hin'.
-  assert (H1 : count_pkt pkt (es_msgs gs) <= 1) by exact (Htamo pkt Hbody).
+  intros Htoken_at_most_once Hbody Hin Hin'.
+  assert (H1 : count_pkt pkt (es_msgs gs) <= 1) by exact (Htoken_at_most_once pkt Hbody).
   assert (H2 : count_pkt pkt (es_msgs gs) >= 1) by exact (count_pkt_ge_one_in pkt _ Hin).
   assert (Heq1 : count_pkt pkt (es_msgs gs) = 1).
   { apply Nat.le_antisymm; [exact H1 | exact H2]. }
@@ -4167,7 +4193,7 @@ Proof.
            (Nat.lt_succ_diag_r count) HScount_le_count)).
 Qed.
 
-Lemma tamo_init : forall gs, lts_init ELts gs -> token_at_most_once gs.
+Lemma token_at_most_once_base : forall gs, lts_init ELts gs -> token_at_most_once gs.
 Proof.
   intros gs [_ Hmsgs] pkt _.
   unfold count_pkt. rewrite Hmsgs. simpl. exact (Nat.le_0_l _).
@@ -4189,13 +4215,13 @@ Proof.
 Qed.
 
 (** Count of pkt is 0 when pkt.src is Idle (no Token from idle in bag). *)
-Lemma tamo_count_idle_src gs pkt :
+Lemma token_at_most_once_count_idle_src gs pkt :
     token_src_not_idle gs ->
     ep_body pkt = Token ->
     (proc_of gs (ep_src pkt)).(ps_phase) = Idle ->
     count_pkt pkt (es_msgs gs) = 0.
 Proof.
-  intros Htsni Hbody Hidle.
+  intros Htoken_src_not_idle Hbody Hidle.
   apply count_pkt_zero_if_no_match.
   intros q Hq.
   unfold pkt_matches.
@@ -4203,17 +4229,17 @@ Proof.
   destruct (node_eq (ep_dst pkt) (ep_dst q)) as [_ | _]; [| reflexivity].
   destruct (ep_body pkt) eqn:Hbp; [| rewrite Hbody in Hbp; discriminate].
   destruct (ep_body q) eqn:Hbq; [| reflexivity].
-  exfalso. apply (Htsni q Hq Hbq).
+  exfalso. apply (Htoken_src_not_idle q Hq Hbq).
   rewrite <- Hsrc. exact Hidle.
 Qed.
 
-Lemma tamo_step gs lbl gs' :
+Lemma token_at_most_once_step gs lbl gs' :
     token_at_most_once gs ->
     token_src_not_idle gs ->
     lts_trans ELts gs lbl gs' ->
     token_at_most_once gs'.
 Proof.
-  intros Htamo Htsni Hstep.
+  intros Htoken_at_most_once Htoken_src_not_idle Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -4226,7 +4252,7 @@ Proof.
     + (* pkt2.src = initiator: no old Token(init→x) (init was Idle) *)
       assert (Hidle_src : (proc_of gs0 (ep_src pkt2)).(ps_phase) = Idle).
       { unfold proc_of. simpl. rewrite Hsrc. exact Hph0. }
-      rewrite (tamo_count_idle_src gs0 pkt2 Htsni Hbody2 Hidle_src).
+      rewrite (token_at_most_once_count_idle_src gs0 pkt2 Htoken_src_not_idle Hbody2 Hidle_src).
       simpl Nat.add.
       apply count_pkt_send_to_all_le_one.
       * exact Hsrc.
@@ -4235,7 +4261,7 @@ Proof.
     + (* pkt2.src ≠ initiator: new tokens have src=init, old ≤ 1 *)
       rewrite (count_pkt_src_mismatch pkt2 initiator my_nbrs Token Hnsrc).
       rewrite Nat.add_0_r.
-      exact (Htamo pkt2 Hbody2).
+      exact (Htoken_at_most_once pkt2 Hbody2).
 
   (* ---- step_deliver ---- *)
   - subst gs0'.
@@ -4265,7 +4291,7 @@ Proof.
       assert (H1 : count_pkt pkt2 (remove_pkt node_eq pkt (es_msgs gs0)) <=
                    count_pkt pkt2 (es_msgs gs0))
         by exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)).
-      assert (H2 : count_pkt pkt2 (es_msgs gs0) <= 1) by exact (Htamo pkt2 Hbody2).
+      assert (H2 : count_pkt pkt2 (es_msgs gs0) <= 1) by exact (Htoken_at_most_once pkt2 Hbody2).
       (* Part 2: count in new_extra *)
       destruct (Nat.eqb (length fwds) 0) eqn:Hleaf.
       * (* Leaf: new = [Echo]. Token count = 0. *)
@@ -4281,7 +4307,7 @@ Proof.
         destruct (node_eq (ep_src pkt2) self) as [Hsrc2 | Hnsrc2].
         -- (* pkt2.src = self: old count = 0 (self was Idle) *)
            assert (Hc0 : count_pkt pkt2 (es_msgs gs0) = 0).
-           { apply tamo_count_idle_src; [exact Htsni | exact Hbody2 |].
+           { apply token_at_most_once_count_idle_src; [exact Htoken_src_not_idle | exact Hbody2 |].
              unfold proc_of. rewrite Hsrc2. rewrite <- Hpeq. simpl. exact Hphase. }
            rewrite Hc0 in H1. apply Nat.le_0_r in H1. rewrite H1.
            apply count_pkt_send_to_all_le_one.
@@ -4299,7 +4325,7 @@ Proof.
       rewrite Hgs'_msgs, count_pkt_app.
       assert (H1 : count_pkt pkt2 (remove_pkt node_eq pkt (es_msgs gs0)) <= 1).
       { apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0));
-        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htamo pkt2 Hbody2)]. }
+        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)]. }
       assert (Hecho_count : count_pkt pkt2 [mkPkt self sender Echo] = 0).
       { apply count_pkt_zero_if_no_match. intros q [<- | []].
         unfold pkt_matches. simpl.
@@ -4314,7 +4340,7 @@ Proof.
         rewrite Hbody, Hphase. reflexivity. }
       rewrite Hgs'_msgs.
       apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0));
-        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htamo pkt2 Hbody2)].
+        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)].
 
     (* Echo/Idle: drop. *)
     + assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt (es_msgs gs0)).
@@ -4322,7 +4348,7 @@ Proof.
         rewrite Hbody, Hphase. reflexivity. }
       rewrite Hgs'_msgs.
       apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0));
-        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htamo pkt2 Hbody2)].
+        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)].
 
     (* Echo/Active: possibly adds Echo(self→par). No new Tokens. *)
     + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -4334,7 +4360,7 @@ Proof.
            rewrite Hgs'_msgs, count_pkt_app.
            assert (H1 : count_pkt pkt2 (remove_pkt node_eq pkt (es_msgs gs0)) <= 1).
            { apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0));
-             [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htamo pkt2 Hbody2)]. }
+             [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)]. }
            assert (Hecho_count : count_pkt pkt2 [mkPkt self par0 Echo] = 0).
            { apply count_pkt_zero_if_no_match. intros q [<- | []].
              unfold pkt_matches. simpl.
@@ -4347,13 +4373,13 @@ Proof.
              rewrite Hbody, Hphase, Hone, Hpar0. rewrite Hpeq. reflexivity. }
            rewrite Hgs'_msgs.
            apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0));
-        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htamo pkt2 Hbody2)].
+        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)].
       * assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt (es_msgs gs0)).
         { unfold gs', handle_msg. change (es_procs gs_mid self) with p.
           rewrite Hbody, Hphase, Hone. rewrite Hpeq. reflexivity. }
         rewrite Hgs'_msgs.
         apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0));
-        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htamo pkt2 Hbody2)].
+        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)].
 
     (* Echo/Decided: drop. *)
     + assert (Hgs'_msgs : es_msgs gs' = remove_pkt node_eq pkt (es_msgs gs0)).
@@ -4361,17 +4387,17 @@ Proof.
         rewrite Hbody, Hphase. reflexivity. }
       rewrite Hgs'_msgs.
       apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0));
-        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htamo pkt2 Hbody2)].
+        [exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)) | exact (Htoken_at_most_once pkt2 Hbody2)].
 Qed.
 
 Theorem token_at_most_once_holds : is_invariant ELts token_at_most_once.
 Proof.
   assert (Hcomb : is_invariant ELts (fun gs => token_at_most_once gs /\ token_src_not_idle gs)).
   { apply invariant_by_induction.
-    - intros gs Hi. exact (conj (tamo_init gs Hi) (tsni_init gs Hi)).
-    - intros gs lbl gs' [Htamo Htsni] Hstep.
-      exact (conj (tamo_step gs lbl gs' Htamo Htsni Hstep)
-                  (tsni_step gs lbl gs' Htsni Hstep)). }
+    - intros gs Hi. exact (conj (token_at_most_once_base gs Hi) (token_src_not_idle_base gs Hi)).
+    - intros gs lbl gs' [Htoken_at_most_once Htoken_src_not_idle] Hstep.
+      exact (conj (token_at_most_once_step gs lbl gs' Htoken_at_most_once Htoken_src_not_idle Hstep)
+                  (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep)). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -4380,20 +4406,20 @@ Definition token_from_parent_consumed (gs : EState) : Prop :=
   forall n p, (proc_of gs n).(ps_parent) = Some p ->
     ~ In (mkPkt p n Token) (es_msgs gs).
 
-Lemma tfpc_init : forall gs, lts_init ELts gs -> token_from_parent_consumed gs.
+Lemma token_from_parent_consumed_base : forall gs, lts_init ELts gs -> token_from_parent_consumed gs.
 Proof.
   intros gs [_ Hmsgs] n p _ Hin.
   rewrite Hmsgs in Hin. contradiction.
 Qed.
 
-Lemma tfpc_step gs lbl gs' :
+Lemma token_from_parent_consumed_step gs lbl gs' :
     token_at_most_once gs ->
     token_from_parent_consumed gs ->
     parent_is_active gs ->
     lts_trans ELts gs lbl gs' ->
     token_from_parent_consumed gs'.
 Proof.
-  intros Htamo Htfpc Hpia Hstep.
+  intros Htoken_at_most_once Htoken_from_parent Hparent_active Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ---- step_start ---- *)
@@ -4409,14 +4435,14 @@ Proof.
     + rewrite (Hother_proc n Hne) in Hpar.
       unfold gs', initiator_start in Hpin. simpl in Hpin.
       apply in_app_iff in Hpin as [Hold | Hnew].
-      * exact (Htfpc n p Hpar Hold).
+      * exact (Htoken_from_parent n p Hpar Hold).
       * apply send_to_all_inv in Hnew as [Hsrc [Hdst Hbody]].
         assert (Heq_src : p = initiator) by exact Hsrc.
         subst p.
         (* n ∈ all_nodes since it appears as dst in send_to_all, which uses nbrs ⊆ all_nodes *)
         assert (Hn_in : In n all_nodes).
         { simpl in Hdst. exact (filter_subset _ all_nodes n Hdst). }
-        destruct (Hpia n Hn_in initiator Hpar) as [Hact | Hdec].
+        destruct (Hparent_active n Hn_in initiator Hpar) as [Hact | Hdec].
         -- unfold proc_of in Hact. simpl in Hact. rewrite Hph0 in Hact. discriminate.
         -- unfold proc_of in Hdec. simpl in Hdec. rewrite Hph0 in Hdec. discriminate.
 
@@ -4455,21 +4481,21 @@ Proof.
         rewrite Hself_par_new in Hpar. injection Hpar as Hpar_eq. symmetry in Hpar_eq. subst par.
         (* pkt = Token(sender→self). By tamo, pkt appears at most once in old.
            Since pkt IS in old (step_deliver premise), removing it leaves no copy. *)
-        assert (Htamo_not_in : ~ In pkt (remove_pkt node_eq pkt (es_msgs gs0)))
-          by exact (tamo_remove_not_in gs0 pkt Htamo Hbody Hin).
+        assert (Htoken_not_in : ~ In pkt (remove_pkt node_eq pkt (es_msgs gs0)))
+          by exact (token_at_most_once_remove_not_in gs0 pkt Htoken_at_most_once Hbody Hin).
         unfold gs', handle_msg in Hpin. change (es_procs gs_mid self) with p in Hpin.
         rewrite Hbody, Hphase in Hpin.
         set (len1 := length (filter (fun x => if node_eq x (ep_src pkt) then false else true)
                                     (nbrs all_nodes adj self))) in Hpin.
         destruct (Nat.eqb len1 0);
         simpl in Hpin; apply in_app_iff in Hpin as [Hold | Hnew].
-        -- (* pkt ∈ remove_pkt old: contradicts tamo_not_in *)
-           exfalso. apply Htamo_not_in.
+        -- (* pkt ∈ remove_pkt old: contradicts token_not_in *)
+           exfalso. apply Htoken_not_in.
            assert (Hpkt : {| ep_src := sender; ep_dst := self; ep_body := Token |} = pkt).
            { destruct pkt as [s d b]. simpl in *. subst. reflexivity. }
            rewrite Hpkt in Hold. exact Hold.
         -- destruct Hnew as [H0 | []]. simpl in *. discriminate.
-        -- exfalso. apply Htamo_not_in.
+        -- exfalso. apply Htoken_not_in.
            assert (Hpkt : {| ep_src := sender; ep_dst := self; ep_body := Token |} = pkt).
            { destruct pkt as [s d b]. simpl in *. subst. reflexivity. }
            rewrite Hpkt in Hold. exact Hold.
@@ -4490,9 +4516,9 @@ Proof.
                                     (nbrs all_nodes adj self))) in Hpin.
         destruct (Nat.eqb len1 0);
         simpl in Hpin; apply in_app_iff in Hpin as [Hold | Hnew].
-        -- exact (Htfpc n par Hpar (remove_pkt_in _ _ _ Hold)).
+        -- exact (Htoken_from_parent n par Hpar (remove_pkt_in _ _ _ Hold)).
         -- destruct Hnew as [Hpkt_eq | []]. injection Hpkt_eq as _ _ Hbody_eq. discriminate.
-        -- exact (Htfpc n par Hpar (remove_pkt_in _ _ _ Hold)).
+        -- exact (Htoken_from_parent n par Hpar (remove_pkt_in _ _ _ Hold)).
         -- apply send_to_all_inv in Hnew as [Hsrc [Hpd _]].
            simpl in Hsrc, Hpd.
            (* Hsrc : par = self; Hpar : proc_of gs0 n.parent = Some par. Rewrite to get Some self.
@@ -4501,7 +4527,7 @@ Proof.
            { apply filter_subset in Hpd.
              unfold nbrs in Hpd. apply (filter_subset _ all_nodes n Hpd). }
            rewrite Hsrc in Hpar.
-           destruct (Hpia n Hn_in self Hpar) as [Hact | Hdec].
+           destruct (Hparent_active n Hn_in self Hpar) as [Hact | Hdec].
            ++ unfold proc_of in Hact. rewrite <- Hpeq in Hact. simpl in Hact. rewrite Hphase in Hact. discriminate.
            ++ unfold proc_of in Hdec. rewrite <- Hpeq in Hdec. simpl in Hdec. rewrite Hphase in Hdec. discriminate.
 
@@ -4514,7 +4540,7 @@ Proof.
       apply in_app_iff in Hpin as [Hold | Hnew].
       * apply remove_pkt_in in Hold.
         unfold proc_of in Hpar. rewrite Hgs'_procs in Hpar.
-        exact (Htfpc n par Hpar Hold).
+        exact (Htoken_from_parent n par Hpar Hold).
       * destruct Hnew as [Hpkt_eq | []]. injection Hpkt_eq as _ _ Hbody_eq. discriminate.
 
     (* Token/Decided: procs unchanged, pkt dropped *)
@@ -4525,7 +4551,7 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       unfold proc_of in Hpar. rewrite Hgs'_procs in Hpar.
-      exact (Htfpc n par Hpar Hpin).
+      exact (Htoken_from_parent n par Hpar Hpin).
 
     (* Echo/Idle: procs unchanged, pkt dropped *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -4535,7 +4561,7 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       unfold proc_of in Hpar. rewrite Hgs'_procs in Hpar.
-      exact (Htfpc n par Hpar Hpin).
+      exact (Htoken_from_parent n par Hpar Hpin).
 
     (* Echo/Active: self.children updated; possibly self becomes Decided. *)
     + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
@@ -4557,8 +4583,8 @@ Proof.
               (* parent(n=self) = Some par0 in gs0, and Token(par0→n) is in gs0. Contradiction. *)
               assert (Hpar_old : (proc_of gs0 n).(ps_parent) = Some par0).
               { unfold proc_of. rewrite <- Hpeq. exact Hpar0. }
-              exact (Htfpc n par0 Hpar_old Hpin_old).
-           ++ unfold proc_of in Hpar. exact (Htfpc n par Hpar Hpin_old).
+              exact (Htoken_from_parent n par0 Hpar_old Hpin_old).
+           ++ unfold proc_of in Hpar. exact (Htoken_from_parent n par Hpar Hpin_old).
         -- set (decided := mkProc Decided None 0 (ep_src pkt :: ps_children p)).
            assert (Hgs'eq : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self decided)
                                                (es_msgs gs_mid)).
@@ -4569,7 +4595,7 @@ Proof.
            rewrite Hgs'eq in Hpar. rewrite proc_of_upd in Hpar.
            destruct (node_eq self n) as [-> | Hne].
            ++ simpl in Hpar. discriminate.
-           ++ unfold proc_of in Hpar. exact (Htfpc n par Hpar Hpin_old).
+           ++ unfold proc_of in Hpar. exact (Htoken_from_parent n par Hpar Hpin_old).
       * set (new_p := mkProc Active (ps_parent p) (Nat.pred (ps_pending p))
                               (ep_src pkt :: ps_children p)).
         assert (Hgs'eq : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self new_p)
@@ -4584,8 +4610,8 @@ Proof.
            (* Hpar : ps_parent p = Some par *)
            assert (Hpar_old : (proc_of gs0 n).(ps_parent) = Some par).
            { unfold proc_of. rewrite <- Hpeq. exact Hpar. }
-           exact (Htfpc n par Hpar_old Hpin_old).
-        ++ unfold proc_of in Hpar. exact (Htfpc n par Hpar Hpin_old).
+           exact (Htoken_from_parent n par Hpar_old Hpin_old).
+        ++ unfold proc_of in Hpar. exact (Htoken_from_parent n par Hpar Hpin_old).
 
     (* Echo/Decided: procs unchanged, pkt dropped *)
     + assert (Hgs'_procs : es_procs gs' = es_procs gs0).
@@ -4595,7 +4621,7 @@ Proof.
       rewrite Hbody, Hphase in Hpin. simpl in Hpin.
       apply remove_pkt_in in Hpin.
       unfold proc_of in Hpar. rewrite Hgs'_procs in Hpar.
-      exact (Htfpc n par Hpar Hpin).
+      exact (Htoken_from_parent n par Hpar Hpin).
 Qed.
 
 Theorem token_from_parent_consumed_holds : is_invariant ELts token_from_parent_consumed.
@@ -4605,19 +4631,19 @@ Proof.
                parent_is_active gs /\ token_src_not_idle gs)).
   { apply invariant_by_induction.
     - intros gs Hi.
-      exact (conj (tamo_init gs Hi)
-             (conj (tfpc_init gs Hi)
-             (conj (pia_init gs Hi) (tsni_init gs Hi)))).
-    - intros gs lbl gs' [Htamo [Htfpc [Hpia Htsni]]] Hstep.
-      exact (conj (tamo_step gs lbl gs' Htamo Htsni Hstep)
-             (conj (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep)
-             (conj (pia_step gs lbl gs' Hpia Htsni Hstep)
-                   (tsni_step gs lbl gs' Htsni Hstep)))). }
+      exact (conj (token_at_most_once_base gs Hi)
+             (conj (token_from_parent_consumed_base gs Hi)
+             (conj (parent_is_active_base gs Hi) (token_src_not_idle_base gs Hi)))).
+    - intros gs lbl gs' [Htoken_at_most_once [Htoken_from_parent [Hparent_active Htoken_src_not_idle]]] Hstep.
+      exact (conj (token_at_most_once_step gs lbl gs' Htoken_at_most_once Htoken_src_not_idle Hstep)
+             (conj (token_from_parent_consumed_step gs lbl gs' Htoken_at_most_once Htoken_from_parent Hparent_active Hstep)
+             (conj (parent_is_active_step gs lbl gs' Hparent_active Htoken_src_not_idle Hstep)
+                   (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep)))). }
   intros gs Hr. exact (proj1 (proj2 (Hcomb gs Hr))).
 Qed.
 
 (* ================================================================== *)
-(** *** pending_pos_active: PENS + PNC combined invariant *)
+(** *** pending_pos_active: If m is Active, pending(m) >= 1, and parent(m) = par, then Echo(m→par) is not yet in the bag. *)
 
 Definition pending_pos_active (gs : EState) : Prop :=
   forall m par,
@@ -4627,19 +4653,19 @@ Definition pending_pos_active (gs : EState) : Prop :=
     ~ In (mkPkt m par Echo) (es_msgs gs) /\
     ~ In m (proc_of gs par).(ps_children).
 
-Lemma ppa_init : forall gs, lts_init ELts gs -> pending_pos_active gs.
+Lemma pending_pos_active_base : forall gs, lts_init ELts gs -> pending_pos_active gs.
 Proof.
   intros gs [Hproc _] m par Hph _ _.
   unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
 Qed.
 
-Lemma ppa_step gs lbl gs' :
+Lemma pending_pos_active_step gs lbl gs' :
     pending_pos_active gs -> token_from_parent_consumed gs ->
     idle_not_in_children gs -> echo_src_not_idle gs ->
     valid_packets gs -> parent_is_neighbor gs ->
     lts_trans ELts gs lbl gs' -> pending_pos_active gs'.
 Proof.
-  intros Hppa Htfpc Hinic Hesni Hvp Hpin Hstep.
+  intros Hpending_pos Htoken_from_parent Hidle_not_in_children Hecho_src_not_idle Hvp Hpin Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
   - set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
     assert (Hother : forall n, n <> initiator -> proc_of gs' n = proc_of gs0 n).
@@ -4650,7 +4676,7 @@ Proof.
     intros m par Hph Hpar Hpend.
     destruct (node_eq m initiator) as [-> | Hne]; [rewrite Hinit_par in Hpar; discriminate|].
     rewrite (Hother m Hne) in Hph, Hpar, Hpend.
-    destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]. split.
+    destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]. split.
     + unfold gs', initiator_start. simpl. intro H. apply in_app_iff in H as [Ho|Hn].
       * exact (Hecho Ho).
       * apply send_to_all_inv in Hn as [_ [_ Hb]]. simpl in Hb. discriminate.
@@ -4705,16 +4731,16 @@ Proof.
              fold sender. fold fwds. rewrite (proj2 (Nat.eqb_neq _ 0) Hleaf); reflexivity. }
            split.
            ++ rewrite Hmsgs; intro H; apply in_app_iff in H as [Ho|Hn].
-              ** apply remove_pkt_in in Ho; exact (Hesni (mkPkt self sender Echo) Ho eq_refl Hself_idle).
+              ** apply remove_pkt_in in Ho; exact (Hecho_src_not_idle (mkPkt self sender Echo) Ho eq_refl Hself_idle).
               ** apply send_to_all_inv in Hn as [_ [_ Hb]]; simpl in Hb; discriminate.
            ++ destruct (node_eq sender self) as [Heq|Hne].
               ** exfalso.
                  assert (Hadj_ss : adj sender self = true).
                  { change sender with (ep_src pkt). change self with (ep_dst pkt). exact (Hvp pkt Hin). }
                  rewrite Heq in Hadj_ss. rewrite adj_irrefl in Hadj_ss. discriminate.
-              ** rewrite (Hother sender Hne); exact (Hinic sender self Hself_idle).
+              ** rewrite (Hother sender Hne); exact (Hidle_not_in_children sender self Hself_idle).
       * rewrite (Hother m Hne) in Hph, Hpar, Hpend.
-        destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild].
+        destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild].
         assert (Hmi : forall q, In q (es_msgs gs') ->
             In q (es_msgs gs_mid) \/ q = mkPkt self sender Echo \/
             (ep_src q = self /\ ep_body q = Token)).
@@ -4740,19 +4766,19 @@ Proof.
       assert (Hmg : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
       { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
-      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
       * rewrite Hmg; intro H; apply in_app_iff in H as [Ho|Hn].
         -- exact (Hecho (remove_pkt_in _ _ _ Ho)).
         -- destruct Hn as [Heq|[]]; injection Heq as Hms Hds; subst m par.
            assert (He : pkt = mkPkt sender self Token).
            { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-           rewrite He in Hin; exact (Htfpc self sender Hpar Hin).
+           rewrite He in Hin; exact (Htoken_from_parent self sender Hpar Hin).
       * unfold proc_of; rewrite Hpr; exact Hchild.
     + (* Token/Decided *)
       assert (Hpr : es_procs gs' = es_procs gs0).
       { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
-      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
       * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
         rewrite Hbody, Hphase in H; simpl in H; exact (Hecho (remove_pkt_in _ _ _ H)).
       * unfold proc_of; rewrite Hpr; exact Hchild.
@@ -4760,7 +4786,7 @@ Proof.
       assert (Hpr : es_procs gs' = es_procs gs0).
       { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
-      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
       * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
         rewrite Hbody, Hphase in H; simpl in H; exact (Hecho (remove_pkt_in _ _ _ H)).
       * unfold proc_of; rewrite Hpr; exact Hchild.
@@ -4781,7 +4807,7 @@ Proof.
            ++ rewrite Hge, proc_of_upd in Hph, Hpar, Hpend.
               destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
               unfold proc_of in Hph, Hpar, Hpend.
-              destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+              destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
               ** rewrite Hge; simpl es_msgs; intro H; apply in_app_iff in H as [Ho|Hn].
                  --- exact (Hecho (remove_pkt_in _ _ _ Ho)).
                  --- destruct Hn as [Heq|[]]; injection Heq as Hms _; exact (Hne (eq_sym Hms)).
@@ -4791,7 +4817,7 @@ Proof.
                      +++ assert (Hp : (proc_of gs0 sender).(ps_parent) = Some self) by (rewrite Heq; exact Hpar).
                          assert (He : pkt = mkPkt sender self Echo).
                          { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-                         rewrite He in Hin; exact (proj1 (Hppa sender self Hph Hp Hpend) Hin).
+                         rewrite He in Hin; exact (proj1 (Hpending_pos sender self Hph Hp Hpend) Hin).
                      +++ rewrite <- Heq in Hchild; exact (Hchild Hr).
                  --- unfold proc_of; exact Hchild.
         -- set (dec := mkProc Decided None 0 (sender :: ps_children p)).
@@ -4805,7 +4831,7 @@ Proof.
            ++ rewrite Hge, proc_of_upd in Hph, Hpar, Hpend.
               destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
               unfold proc_of in Hph, Hpar, Hpend.
-              destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+              destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
               ** rewrite Hge; simpl es_msgs; intro H; exact (Hecho (remove_pkt_in _ _ _ H)).
               ** rewrite Hge, proc_of_upd.
                  destruct (node_eq self par) as [Heq|Hnep].
@@ -4813,7 +4839,7 @@ Proof.
                      +++ assert (Hp : (proc_of gs0 sender).(ps_parent) = Some self) by (rewrite Heq; exact Hpar).
                          assert (He : pkt = mkPkt sender self Echo).
                          { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-                         rewrite He in Hin; exact (proj1 (Hppa sender self Hph Hp Hpend) Hin).
+                         rewrite He in Hin; exact (proj1 (Hpending_pos sender self Hph Hp Hpend) Hin).
                      +++ rewrite <- Heq in Hchild; exact (Hchild Hr).
                  --- unfold proc_of; exact Hchild.
       * set (np := mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
@@ -4837,7 +4863,7 @@ Proof.
            assert (Hpo1 : (proc_of gs0 self).(ps_pending) >= 1) by
              (unfold proc_of; rewrite <- Hpeq;
               exact (Nat.le_trans 1 2 _ (Nat.le_succ_diag_r 1) Hold2)).
-           destruct (Hppa self par Hpho Hparo Hpo1) as [Heo Hco]; split.
+           destruct (Hpending_pos self par Hpho Hparo Hpo1) as [Heo Hco]; split.
            ++ rewrite Hge; simpl es_msgs; intro H; exact (Heo (remove_pkt_in _ _ _ H)).
            ++ rewrite Hge, proc_of_upd.
               destruct (node_eq self par) as [Heq|Hnep].
@@ -4849,7 +4875,7 @@ Proof.
         -- rewrite Hge, proc_of_upd in Hph, Hpar, Hpend.
            destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
            unfold proc_of in Hph, Hpar, Hpend.
-           destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+           destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
            ++ rewrite Hge; simpl es_msgs; intro H; exact (Hecho (remove_pkt_in _ _ _ H)).
            ++ rewrite Hge, proc_of_upd.
               destruct (node_eq self par) as [Heq|Hnep].
@@ -4857,14 +4883,14 @@ Proof.
                  --- assert (Hp : (proc_of gs0 sender).(ps_parent) = Some self) by (rewrite Heq; exact Hpar).
                      assert (He : pkt = mkPkt sender self Echo).
                      { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-                     rewrite He in Hin; exact (proj1 (Hppa sender self Hph Hp Hpend) Hin).
+                     rewrite He in Hin; exact (proj1 (Hpending_pos sender self Hph Hp Hpend) Hin).
                  --- rewrite <- Heq in Hchild; exact (Hchild Hr).
               ** unfold proc_of; exact Hchild.
     + (* Echo/Decided *)
       assert (Hpr : es_procs gs' = es_procs gs0).
       { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
       unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
-      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      destruct (Hpending_pos m par Hph Hpar Hpend) as [Hecho Hchild]; split.
       * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
         rewrite Hbody, Hphase in H; simpl in H; exact (Hecho (remove_pkt_in _ _ _ H)).
       * unfold proc_of; rewrite Hpr; exact Hchild.
@@ -4879,19 +4905,19 @@ Proof.
                token_src_not_idle gs /\ INV gs)).
   { apply invariant_by_induction.
     - intros gs Hi.
-      exact (conj (ppa_init gs Hi) (conj (tamo_init gs Hi) (conj (tfpc_init gs Hi)
-             (conj (pia_init gs Hi) (conj (inic_init gs Hi) (conj (esni_init gs Hi)
-             (conj (tsni_init gs Hi) (INV_init gs Hi)))))))).
-    - intros gs lbl gs' [Hppa [Htamo [Htfpc [Hpia [Hinic [Hesni [Htsni Hinv]]]]]]] Hstep.
+      exact (conj (pending_pos_active_base gs Hi) (conj (token_at_most_once_base gs Hi) (conj (token_from_parent_consumed_base gs Hi)
+             (conj (parent_is_active_base gs Hi) (conj (idle_not_in_children_base gs Hi) (conj (echo_src_not_idle_base gs Hi)
+             (conj (token_src_not_idle_base gs Hi) (INV_init gs Hi)))))))).
+    - intros gs lbl gs' [Hpending_pos [Htoken_at_most_once [Htoken_from_parent [Hparent_active [Hidle_not_in_children [Hecho_src_not_idle [Htoken_src_not_idle Hinv]]]]]]] Hstep.
       refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _))))))).
-      + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+      + exact (pending_pos_active_step gs lbl gs' Hpending_pos Htoken_from_parent Hidle_not_in_children Hecho_src_not_idle
                         (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
-      + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
-      + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
-      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
-      + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
-      + exact (esni_step gs lbl gs' Hesni Hstep).
-      + exact (tsni_step gs lbl gs' Htsni Hstep).
+      + exact (token_at_most_once_step gs lbl gs' Htoken_at_most_once Htoken_src_not_idle Hstep).
+      + exact (token_from_parent_consumed_step gs lbl gs' Htoken_at_most_once Htoken_from_parent Hparent_active Hstep).
+      + exact (parent_is_active_step gs lbl gs' Hparent_active Htoken_src_not_idle Hstep).
+      + exact (idle_not_in_children_step gs lbl gs' Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hstep).
+      + exact (echo_src_not_idle_step gs lbl gs' Hecho_src_not_idle Hstep).
+      + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep).
       + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hin Heq].
         * exact (INV_step_start gs0 Hinv Hph).
         * exact (INV_step_deliver gs0 pkt gs0' Hinv Hin Heq). }
@@ -4901,51 +4927,50 @@ Qed.
 (* ================================================================== *)
 (** *** Helper invariants for weak_pending_ge_count *)
 
-(** echo_dst_not_idle: Echo(src→dst) ∈ bag → phase(dst) ≠ Idle *)
+(** echo_dst_not_idle: Every Echo in the bag targets a non-Idle node (the destination is Active or Decided). *)
 Definition echo_dst_not_idle (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
     (proc_of gs (ep_dst pkt)).(ps_phase) <> Idle.
 
-(** echo_token_sender_not: Echo(A→B) ∈ bag → Token(B→A) ∉ bag *)
+(** echo_token_sender_not: If Echo(A→B) is in the bag, the reverse Token(B→A) is not. *)
 Definition echo_token_sender_not (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
     ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs).
 
-(** children_implies_no_parent_token: c ∈ children(m) → Token(m→c) ∉ bag *)
+(** children_implies_no_parent_token: If c is in m's children list, Token(m→c) is no longer in the bag (it was already delivered). *)
 Definition children_implies_no_parent_token (gs : EState) : Prop :=
   forall m c, In c (proc_of gs m).(ps_children) ->
     ~ In (mkPkt m c Token) (es_msgs gs).
 
-(** echo_not_in_children: Echo(src→dst) ∈ bag → src ∉ children(dst) *)
+(** echo_not_in_children: If Echo(n→m) is still in the bag (not yet delivered), n is not yet in m's children list. *)
 Definition echo_not_in_children (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
     ~ In (ep_src pkt) (proc_of gs (ep_dst pkt)).(ps_children).
 
-(** echo_src_in_fwds: Echo(src→dst) ∈ bag → parent(dst) ≠ Some src *)
+(** echo_src_in_fwds: If Echo(n→m) is in the bag, n is in m's forward-set (parent(m) ≠ n). *)
 Definition echo_src_in_fwds (gs : EState) : Prop :=
   forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
     (proc_of gs (ep_dst pkt)).(ps_parent) <> Some (ep_src pkt).
 
-(** pending_exact_count_ge: pending(m) + |children(m)| ≥ |act_fwds(m)|
-    for Active/Decided m. *)
+(** pending_exact_count_ge: For every Active/Decided node, pending + |children| >= |forwards|. (This is actually equality, but >= suffices.) *)
 Definition pending_exact_count_ge (gs : EState) : Prop :=
   forall m,
     ((proc_of gs m).(ps_phase) = Active \/ (proc_of gs m).(ps_phase) = Decided) ->
     (proc_of gs m).(ps_pending) + length (proc_of gs m).(ps_children) >=
     length (act_fwds gs m).
 
-(** echo_at_most_once: each Echo(src→dst) appears at most once in the bag. *)
+(** echo_at_most_once: Each Echo packet appears at most once in the message bag. *)
 Definition echo_at_most_once (gs : EState) : Prop :=
   forall pkt, ep_body pkt = Echo -> count_pkt pkt (es_msgs gs) <= 1.
 
-Lemma eamo_remove_not_in (gs : EState) (pkt : @echo_packet node) :
+Lemma echo_at_most_once_remove_not_in (gs : EState) (pkt : @echo_packet node) :
     echo_at_most_once gs ->
     ep_body pkt = Echo ->
     In pkt (es_msgs gs) ->
     ~ In pkt (remove_pkt node_eq pkt (es_msgs gs)).
 Proof.
-  intros Heamo Hbody Hin Hin'.
-  assert (H1 : count_pkt pkt (es_msgs gs) <= 1) by exact (Heamo pkt Hbody).
+  intros Hecho_at_most_once Hbody Hin Hin'.
+  assert (H1 : count_pkt pkt (es_msgs gs) <= 1) by exact (Hecho_at_most_once pkt Hbody).
   assert (H2 : count_pkt pkt (es_msgs gs) >= 1) by exact (count_pkt_ge_one_in pkt _ Hin).
   assert (Heq1 : count_pkt pkt (es_msgs gs) = 1)
     by (apply Nat.le_antisymm; [exact H1 | exact H2]).
@@ -4962,12 +4987,12 @@ Proof.
            (Nat.lt_succ_diag_r count) HScount_le_count)).
 Qed.
 
-Lemma eamo_init : forall gs, lts_init ELts gs -> echo_at_most_once gs.
+Lemma echo_at_most_once_base : forall gs, lts_init ELts gs -> echo_at_most_once gs.
 Proof.
   intros gs [_ Hmsgs] p _. unfold count_pkt. rewrite Hmsgs. simpl. exact (Nat.le_0_l _).
 Qed.
 
-Lemma eamo_step gs lbl gs' :
+Lemma echo_at_most_once_step gs lbl gs' :
     echo_at_most_once gs ->
     echo_src_not_idle gs ->
     echo_token_sender_not gs ->
@@ -4975,7 +5000,7 @@ Lemma eamo_step gs lbl gs' :
     lts_trans ELts gs lbl gs' ->
     echo_at_most_once gs'.
 Proof.
-  intros Heamo Hesni Hetsn Hppa Hstep.
+  intros Hecho_at_most_once Hecho_src_not_idle Hecho_token_sender_not Hpending_pos Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
   - (* step_start: new pkts are Tokens. No new Echoes. *)
     set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
@@ -4991,7 +5016,7 @@ Proof.
       destruct (node_eq (ep_src pkt2) (ep_src q)) as [_ | _]; [| reflexivity].
       destruct (node_eq (ep_dst pkt2) (ep_dst q)) as [_ | _]; [| reflexivity].
       rewrite Hbody2, Hb. reflexivity. }
-    rewrite Hzero. rewrite Nat.add_0_r. exact (Heamo pkt2 Hbody2).
+    rewrite Hzero. rewrite Nat.add_0_r. exact (Hecho_at_most_once pkt2 Hbody2).
   - subst gs0'.
     set (self := ep_dst pkt). set (sender := ep_src pkt).
     set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
@@ -5000,7 +5025,7 @@ Proof.
     assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
     intros pkt2 Hbody2.
     (* Helper: count in gs0 ≤ 1 *)
-    assert (Hle1 : count_pkt pkt2 (es_msgs gs0) <= 1) by exact (Heamo pkt2 Hbody2).
+    assert (Hle1 : count_pkt pkt2 (es_msgs gs0) <= 1) by exact (Hecho_at_most_once pkt2 Hbody2).
     (* Helper: count in gs_mid ≤ 1 *)
     assert (Hle_mid : count_pkt pkt2 (es_msgs gs_mid) <= 1).
     { apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
@@ -5043,7 +5068,7 @@ Proof.
             exfalso.
             assert (Hself_q : (proc_of gs0 (ep_src q)).(ps_phase) = Idle).
             { rewrite <- Hsrc. rewrite Hs. exact Hself_idle. }
-            exact (Hesni q Hq Hbq Hself_q). }
+            exact (Hecho_src_not_idle q Hq Hbq Hself_q). }
         destruct H0 as [H0|H0].
         -- (* count in gs0 = 0: count in gs_mid = 0, total = 0 + count[echo] ≤ 1 *)
            assert (Hle_mid0 : count_pkt pkt2 (es_msgs gs_mid) = 0).
@@ -5090,7 +5115,7 @@ Proof.
         (* q = Echo(self→sender) in gs0.msgs. pkt_matches=true. But we need false. *)
         (* By etsn: Echo(q=self→sender) ∈ gs0 → Token(sender→self) ∉ gs0. But pkt=Token(sender→self) ∈ gs0. *)
         exfalso.
-        assert (Hne := Hetsn q Hq Hbq). simpl in Hne.
+        assert (Hne := Hecho_token_sender_not q Hq Hbq). simpl in Hne.
         (* Hne : ~ In (mkPkt (ep_dst q) (ep_src q) Token) (es_msgs gs0) *)
         (* ep_dst q = sender (from Hdst and Hd: ep_dst pkt2 = sender and ep_dst pkt2 = ep_dst q) *)
         (* ep_src q = self (from Hsrc and Hs: ep_src pkt2 = self and ep_src pkt2 = ep_src q) *)
@@ -5152,7 +5177,7 @@ Proof.
              assert (Hq_eq : q = mkPkt self par0 Echo).
              { destruct q as [qs qd qb]. simpl in Hsrc, Hdst, Hbq |- *.
                rewrite <- Hsrc, <- Hdst, Hbq. rewrite Hs, Hd. reflexivity. }
-             rewrite Hq_eq in Hq. exact (proj1 (Hppa self par0 Hself_ph Hself_par Hpend1) Hq). }
+             rewrite Hq_eq in Hq. exact (proj1 (Hpending_pos self par0 Hself_ph Hself_par Hpend1) Hq). }
            destruct H0 as [H0|H0].
            ++ assert (Hle_mid0 : count_pkt pkt2 (es_msgs gs_mid) = 0).
               { apply Nat.le_antisymm; [| exact (Nat.le_0_l _)].
@@ -5209,7 +5234,7 @@ Proof.
 Qed.
 
 (** Combined step lemma: prove 6 new invariants simultaneously. *)
-Lemma new_inv_combined_step gs lbl gs' :
+Lemma token_echo_accounting_step gs lbl gs' :
     echo_dst_not_idle gs -> echo_token_sender_not gs ->
     children_implies_no_parent_token gs -> echo_not_in_children gs ->
     echo_src_in_fwds gs -> pending_exact_count_ge gs ->
@@ -5225,8 +5250,8 @@ Lemma new_inv_combined_step gs lbl gs' :
     children_implies_no_parent_token gs' /\ echo_not_in_children gs' /\
     echo_src_in_fwds gs' /\ pending_exact_count_ge gs'.
 Proof.
-  intros Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
-         Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep.
+  intros Hecho_dst_not_idle Hecho_token_sender_not Hchildren_no_parent_token Hecho_not_in_children Hecho_src_in_fwds Hpending_count Hecho_at_most_once
+         Hpending_pos Htoken_at_most_once Htoken_from_parent Hparent_active Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hpkt_in_all_nodes Hparent_in_all_nodes Htoken_dst_not_parent Hno_mutual_parent Hinv Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
 
   (* ------------------------------------------------------------------ step_start *)
@@ -5252,7 +5277,7 @@ Proof.
     + (* edni *)
       intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
       apply in_app_iff in Hpin as [Ho|Hn].
-      * assert (H := Hedni pkt' Ho Hbp).
+      * assert (H := Hecho_dst_not_idle pkt' Ho Hbp).
         destruct (node_eq (ep_dst pkt') initiator) as [-> | Hne].
         -- rewrite Hinit_act. discriminate.
         -- rewrite (Hother _ Hne). exact H.
@@ -5260,11 +5285,11 @@ Proof.
     + (* etsn *)
       intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
       apply in_app_iff in Hpin as [Ho|Hn].
-      * assert (H := Hetsn pkt' Ho Hbp).
+      * assert (H := Hecho_token_sender_not pkt' Ho Hbp).
         intro Htin. rewrite Hmsgs in Htin. apply in_app_iff in Htin as [Hto|Hnew].
         -- exact (H Hto).
         -- apply send_to_all_inv in Hnew as [Hsrc [_ _]]. simpl in Hsrc.
-           assert (Hcontra := Hedni pkt' Ho Hbp).
+           assert (Hcontra := Hecho_dst_not_idle pkt' Ho Hbp).
            rewrite Hsrc in Hcontra. exact (Hcontra Hinit_idle_gs0).
       * apply send_to_all_inv in Hn as [_ [_ Hb]]. rewrite Hb in Hbp. discriminate.
     + (* cipt *)
@@ -5272,14 +5297,14 @@ Proof.
       destruct (node_eq m initiator) as [-> | Hne].
       * rewrite Hinit_ch in Hch. contradiction.
       * rewrite (Hother m Hne) in Hch.
-        assert (H := Hcipt m c Hch).
+        assert (H := Hchildren_no_parent_token m c Hch).
         intro Hpin. rewrite Hmsgs in Hpin. apply in_app_iff in Hpin as [Ho|Hn].
         -- exact (H Ho).
         -- apply send_to_all_inv in Hn as [Hsrc [_ _]]. simpl in Hsrc. exact (Hne Hsrc).
     + (* enic *)
       intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
       apply in_app_iff in Hpin as [Ho|Hn].
-      * assert (H := Henic pkt' Ho Hbp).
+      * assert (H := Hecho_not_in_children pkt' Ho Hbp).
         destruct (node_eq (ep_dst pkt') initiator) as [-> | Hne].
         -- rewrite Hinit_ch. intro Hc; exact Hc.
         -- rewrite (Hother _ Hne). exact H.
@@ -5287,7 +5312,7 @@ Proof.
     + (* esif *)
       intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
       apply in_app_iff in Hpin as [Ho|Hn].
-      * assert (H := Hesif pkt' Ho Hbp).
+      * assert (H := Hecho_src_in_fwds pkt' Ho Hbp).
         destruct (node_eq (ep_dst pkt') initiator) as [-> | Hne].
         -- rewrite Hinit_par. discriminate.
         -- rewrite (Hother _ Hne). exact H.
@@ -5298,7 +5323,7 @@ Proof.
       * rewrite Hinit_pend, Hinit_ch. simpl length. rewrite Nat.add_0_r.
         unfold act_fwds. rewrite Hinit_par. apply Nat.le_refl.
       * rewrite (Hother m Hne) in Hph.
-        assert (H := Hpecge m Hph).
+        assert (H := Hpending_count m Hph).
         assert (Hag : act_fwds gs' m = act_fwds gs0 m).
         { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
         rewrite Hag. rewrite (Hother m Hne). exact H.
@@ -5359,13 +5384,13 @@ Proof.
         - simpl; intro H; apply in_app_iff in H as [H|H]; [left; exact H|].
           apply send_to_all_inv in H as [Hs [_ Hb]]; right; right; simpl in *; exact (conj Hs Hb). }
       assert (Hsender_ne_idle : (proc_of gs0 sender).(ps_phase) <> Idle)
-        by exact (Htsni pkt Hin Hbody).
+        by exact (Htoken_src_not_idle pkt Hin Hbody).
       assert (Hsender_ne_self : sender <> self).
       { intro Heq. apply Hsender_ne_idle. rewrite Heq. unfold proc_of. rewrite <- Hpeq. exact Hphase. }
       refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
       * (* edni: old Echoes + new Echo(self→sender). No old Echo dst=self (self was Idle). *)
         intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
-        -- apply remove_pkt_in in Ho. assert (H := Hedni pkt' Ho Hbp).
+        -- apply remove_pkt_in in Ho. assert (H := Hecho_dst_not_idle pkt' Ho Hbp).
            destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
            ++ rewrite Hself_act. discriminate.
            ++ rewrite (Hother _ Hne). exact H.
@@ -5373,19 +5398,19 @@ Proof.
         -- rewrite Hbt in Hbp. discriminate.
       * (* etsn: Echo(A→B) ∈ gs'.msgs → Token(B→A) ∉ gs'.msgs *)
         intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
-        -- apply remove_pkt_in in Ho. assert (H := Hetsn pkt' Ho Hbp).
+        -- apply remove_pkt_in in Ho. assert (H := Hecho_token_sender_not pkt' Ho Hbp).
            intro Htin. apply Hmsgs_cla in Htin as [Hto|[Heq|[Hs2 Hbt2]]].
            ++ exact (H (remove_pkt_in _ _ _ Hto)).
            ++ injection Heq; intros; discriminate.
            ++ (* Token(B→A) has src=self: B=self. Echo(A→self) in gs0, self Idle → edni contradiction. *)
-              simpl in Hs2. assert (Hcontra := Hedni pkt' Ho Hbp).
+              simpl in Hs2. assert (Hcontra := Hecho_dst_not_idle pkt' Ho Hbp).
               rewrite Hs2 in Hcontra. exact (Hcontra Hself_idle).
         -- (* pkt' = Echo(self→sender): Token(sender→self) ∉ gs'.msgs *)
            subst pkt'. simpl. intro Htin. apply Hmsgs_cla in Htin as [Hto|[Heq|[Hs2 Hbt2]]].
            ++ (* Hto : In (mkPkt sender self Token) (es_msgs gs_mid) = remove_pkt pkt gs0.msgs. *)
               assert (Hpkt_eq : pkt = mkPkt sender self Token).
               { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-              rewrite <- Hpkt_eq in Hto. exact (tamo_remove_not_in gs0 pkt Htamo Hbody Hin Hto).
+              rewrite <- Hpkt_eq in Hto. exact (token_at_most_once_remove_not_in gs0 pkt Htoken_at_most_once Hbody Hin Hto).
            ++ injection Heq; intros; discriminate.
            ++ exact (Hsender_ne_self Hs2).
         -- rewrite Hbt in Hbp. discriminate.
@@ -5393,14 +5418,14 @@ Proof.
         intros m c Hch.
         destruct (node_eq m self) as [-> | Hne].
         -- rewrite Hself_ch in Hch. contradiction.
-        -- rewrite (Hother m Hne) in Hch. assert (H := Hcipt m c Hch).
+        -- rewrite (Hother m Hne) in Hch. assert (H := Hchildren_no_parent_token m c Hch).
            intro Hpin. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
            ++ exact (H (remove_pkt_in _ _ _ Ho)).
            ++ injection Heq; intros; discriminate.
            ++ simpl in Hs. exact (Hne Hs).
       * (* enic: old Echoes IH (no old Echo dst=self). New Echo(self→sender): self∉children(sender). *)
         intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
-        -- apply remove_pkt_in in Ho. assert (H := Henic pkt' Ho Hbp).
+        -- apply remove_pkt_in in Ho. assert (H := Hecho_not_in_children pkt' Ho Hbp).
            destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
            ++ rewrite Hself_ch. intro Hc; exact Hc.
            ++ rewrite (Hother _ Hne). exact H.
@@ -5408,19 +5433,19 @@ Proof.
            intro Hch.
            assert (Hpkt_eq : pkt = mkPkt sender self Token).
            { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-           rewrite Hpkt_eq in Hin. exact (Hcipt sender self Hch Hin).
+           rewrite Hpkt_eq in Hin. exact (Hchildren_no_parent_token sender self Hch Hin).
         -- rewrite Hbt in Hbp. discriminate.
       * (* esif: old Echoes (no old Echo dst=self). New Echo(self→sender): parent(sender)≠Some self from tdnp. *)
         intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
-        -- apply remove_pkt_in in Ho. assert (H := Hesif pkt' Ho Hbp).
+        -- apply remove_pkt_in in Ho. assert (H := Hecho_src_in_fwds pkt' Ho Hbp).
            destruct (node_eq (ep_dst pkt') self) as [Heq | Hne].
            ++ (* ep_dst pkt' = self: self was Idle, contradiction with edni *)
-              assert (Hcontra := Hedni pkt' Ho Hbp). rewrite Heq in Hcontra.
+              assert (Hcontra := Hecho_dst_not_idle pkt' Ho Hbp). rewrite Heq in Hcontra.
               exact (False_ind _ (Hcontra Hself_idle)).
            ++ rewrite (Hother _ Hne). exact H.
         -- subst pkt'. simpl. rewrite (Hother sender Hsender_ne_self).
            change sender with (ep_src pkt). change self with (ep_dst pkt).
-           exact (Htdnp pkt Hin Hbody).
+           exact (Htoken_dst_not_parent pkt Hin Hbody).
         -- rewrite Hbt in Hbp. discriminate.
       * (* pec_ge: self Active, pending=|fwds|, children=[], act_fwds=fwds. Others IH. *)
         intros m Hph.
@@ -5431,7 +5456,7 @@ Proof.
              exact (filter_adj_ne_parent_eq self sender). }
            rewrite Haf. apply Nat.le_refl.
         -- rewrite (Hother m Hne) in Hph.
-           assert (H := Hpecge m Hph).
+           assert (H := Hpending_count m Hph).
            assert (Hag : act_fwds gs' m = act_fwds gs0 m).
            { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
            rewrite Hag. rewrite (Hother m Hne). exact H.
@@ -5450,7 +5475,7 @@ Proof.
       assert (Hpkt_eq : pkt = mkPkt sender self Token).
       { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
       assert (Hsender_ne_idle : (proc_of gs0 sender).(ps_phase) <> Idle)
-        by exact (Htsni pkt Hin Hbody).
+        by exact (Htoken_src_not_idle pkt Hin Hbody).
       assert (Hself_act : (proc_of gs0 self).(ps_phase) = Active)
         by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
       assert (Hsender_ne_self : sender <> self).
@@ -5460,33 +5485,33 @@ Proof.
         rewrite adj_irrefl in Hadj. discriminate. }
       refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
       * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
-        -- apply remove_pkt_in in Ho. rewrite Hprf. exact (Hedni pkt' Ho Hbp).
+        -- apply remove_pkt_in in Ho. rewrite Hprf. exact (Hecho_dst_not_idle pkt' Ho Hbp).
         -- subst pkt'. simpl. rewrite Hprf. exact Hsender_ne_idle.
       * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
-        -- apply remove_pkt_in in Ho. assert (H := Hetsn pkt' Ho Hbp).
+        -- apply remove_pkt_in in Ho. assert (H := Hecho_token_sender_not pkt' Ho Hbp).
            intro Htin. apply Hmg_cla in Htin as [Hto|Heq].
            ++ exact (H (remove_pkt_in _ _ _ Hto)).
            ++ injection Heq; intros; discriminate.
         -- subst pkt'. simpl. intro Htin. apply Hmg_cla in Htin as [Hto|Heq].
            ++ (* Hto : In (mkPkt sender self Token) (es_msgs gs_mid) = remove_pkt pkt gs0.msgs *)
-              rewrite <- Hpkt_eq in Hto. exact (tamo_remove_not_in gs0 pkt Htamo Hbody Hin Hto).
+              rewrite <- Hpkt_eq in Hto. exact (token_at_most_once_remove_not_in gs0 pkt Htoken_at_most_once Hbody Hin Hto).
            ++ injection Heq; intros; discriminate.
-      * intros m c Hch. rewrite Hprf in Hch. assert (H := Hcipt m c Hch).
+      * intros m c Hch. rewrite Hprf in Hch. assert (H := Hchildren_no_parent_token m c Hch).
         intro Hpin. apply Hmg_cla in Hpin as [Ho|Heq].
         -- exact (H (remove_pkt_in _ _ _ Ho)).
         -- injection Heq; intros; discriminate.
       * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
-        -- apply remove_pkt_in in Ho. rewrite Hprf. exact (Henic pkt' Ho Hbp).
+        -- apply remove_pkt_in in Ho. rewrite Hprf. exact (Hecho_not_in_children pkt' Ho Hbp).
         -- subst pkt'. simpl. rewrite Hprf.
-           intro Hch. rewrite Hpkt_eq in Hin. exact (Hcipt sender self Hch Hin).
+           intro Hch. rewrite Hpkt_eq in Hin. exact (Hchildren_no_parent_token sender self Hch Hin).
       * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
         -- apply remove_pkt_in in Ho. rewrite Hprf.
-           exact (Hesif pkt' Ho Hbp).
+           exact (Hecho_src_in_fwds pkt' Ho Hbp).
         -- subst pkt'. simpl. rewrite Hprf.
            change sender with (ep_src pkt). change self with (ep_dst pkt).
-           exact (Htdnp pkt Hin Hbody).
+           exact (Htoken_dst_not_parent pkt Hin Hbody).
       * intros m Hph. rewrite Hprf in Hph.
-        assert (H := Hpecge m Hph).
+        assert (H := Hpending_count m Hph).
         assert (Hag : act_fwds gs' m = act_fwds gs0 m).
         { apply act_fwds_parent_agree. rewrite Hprf. reflexivity. }
         rewrite Hag. rewrite Hprf. exact H.
@@ -5501,13 +5526,13 @@ Proof.
       { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
       refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hedni pkt' (Hmsub pkt' Hpin) Hbp).
-      * intros pkt' Hpin Hbp. intro Htin. exact (Hetsn pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
-      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Henic pkt' (Hmsub pkt' Hpin) Hbp).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hesif pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_dst_not_idle pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. intro Htin. exact (Hecho_token_sender_not pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
+      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hchildren_no_parent_token m c Hch (Hmsub _ Htin)).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_not_in_children pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_src_in_fwds pkt' (Hmsub pkt' Hpin) Hbp).
       * intros m Hph. rewrite Hprf in Hph.
-        assert (H := Hpecge m Hph).
+        assert (H := Hpending_count m Hph).
         assert (Hag : act_fwds gs' m = act_fwds gs0 m) by
           (apply act_fwds_parent_agree; rewrite Hprf; reflexivity).
         rewrite Hag. rewrite Hprf. exact H.
@@ -5519,13 +5544,13 @@ Proof.
       { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
       refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hedni pkt' (Hmsub pkt' Hpin) Hbp).
-      * intros pkt' Hpin Hbp. intro Htin. exact (Hetsn pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
-      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Henic pkt' (Hmsub pkt' Hpin) Hbp).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hesif pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_dst_not_idle pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. intro Htin. exact (Hecho_token_sender_not pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
+      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hchildren_no_parent_token m c Hch (Hmsub _ Htin)).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_not_in_children pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_src_in_fwds pkt' (Hmsub pkt' Hpin) Hbp).
       * intros m Hph. rewrite Hprf in Hph.
-        assert (H := Hpecge m Hph).
+        assert (H := Hpending_count m Hph).
         assert (Hag : act_fwds gs' m = act_fwds gs0 m) by
           (apply act_fwds_parent_agree; rewrite Hprf; reflexivity).
         rewrite Hag. rewrite Hprf. exact H.
@@ -5547,12 +5572,12 @@ Proof.
            assert (Hpend1 : (proc_of gs0 self).(ps_pending) >= 1).
            { unfold proc_of. rewrite <- Hpeq. apply Nat.eqb_eq in Hone. rewrite Hone.
              simpl. exact (Nat.le_refl _). }
-           assert (Hppa_self := Hppa self par0 Hself_ph_old Hself_par_old Hpend1).
+           assert (Hpending_pos_self := Hpending_pos self par0 Hself_ph_old Hself_par_old Hpend1).
            assert (Hself_not_child_par0 : ~ In self (proc_of gs0 par0).(ps_children))
-             by exact (proj2 Hppa_self).
+             by exact (proj2 Hpending_pos_self).
            assert (Hpar0_ne_idle : (proc_of gs0 par0).(ps_phase) <> Idle).
-           { assert (Hself_in_all : In self all_nodes) by exact (proj2 (Hpnian pkt Hin)).
-             destruct (Hpia self Hself_in_all par0 Hself_par_old) as [Ha|Hd].
+           { assert (Hself_in_all : In self all_nodes) by exact (proj2 (Hpkt_in_all_nodes pkt Hin)).
+             destruct (Hparent_active self Hself_in_all par0 Hself_par_old) as [Ha|Hd].
              - rewrite Ha. discriminate.
              - rewrite Hd. discriminate. }
            assert (Hpar0_ne_self : par0 <> self).
@@ -5587,13 +5612,13 @@ Proof.
            assert (Hpkt_echo : pkt = mkPkt sender self Echo).
            { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
            assert (Hetsn_pkt : ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs0))
-             by exact (Hetsn pkt Hin Hbody).
+             by exact (Hecho_token_sender_not pkt Hin Hbody).
            assert (Htsn_par0_self : ~ In (mkPkt par0 self Token) (es_msgs gs0))
-             by exact (Htfpc self par0 Hself_par_old).
+             by exact (Htoken_from_parent self par0 Hself_par_old).
            refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
            ++ (* edni *)
               intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
-              ** apply remove_pkt_in in Ho. assert (H := Hedni pkt' Ho Hbp).
+              ** apply remove_pkt_in in Ho. assert (H := Hecho_dst_not_idle pkt' Ho Hbp).
                  destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
                  --- rewrite Hself_ph_new. discriminate.
                  --- rewrite (Hother _ Hne). exact H.
@@ -5603,7 +5628,7 @@ Proof.
                  --- rewrite (Hother par0 Hpar0_ne_self). exact Hpar0_ne_idle.
            ++ (* etsn *)
               intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
-              ** apply remove_pkt_in in Ho. assert (H := Hetsn pkt' Ho Hbp).
+              ** apply remove_pkt_in in Ho. assert (H := Hecho_token_sender_not pkt' Ho Hbp).
                  intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
                  --- exact (H (remove_pkt_in _ _ _ Hto)).
                  --- injection Heq; intros; discriminate.
@@ -5622,16 +5647,16 @@ Proof.
                          simpl in Hetsn_pkt. exact (Hetsn_pkt Hto).
                      +++ injection Heq; intros; discriminate.
                  --- intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
-                     +++ exact (Hcipt self c Hrest (remove_pkt_in _ _ _ Hto)).
+                     +++ exact (Hchildren_no_parent_token self c Hrest (remove_pkt_in _ _ _ Hto)).
                      +++ injection Heq; intros; discriminate.
-              ** rewrite (Hother m Hne) in Hch. assert (H := Hcipt m c Hch).
+              ** rewrite (Hother m Hne) in Hch. assert (H := Hchildren_no_parent_token m c Hch).
                  intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
                  --- exact (H (remove_pkt_in _ _ _ Hto)).
                  --- injection Heq as H1 H2 H3. exact (Hne H1).
            ++ (* enic *)
               intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
               ** assert (Ho_orig := Ho). apply remove_pkt_in in Ho.
-                 assert (H := Henic pkt' Ho Hbp).
+                 assert (H := Hecho_not_in_children pkt' Ho Hbp).
                  destruct (node_eq (ep_dst pkt') self) as [Hdst_eq | Hne].
                  --- (* dst=self *)
                      rewrite Hdst_eq. rewrite Hself_ch_new. intro Hch. simpl in Hch.
@@ -5641,7 +5666,7 @@ Proof.
                          { destruct pkt' as [src dst body]. simpl in Heqs, Hdst_eq, Hbp |- *.
                            subst src dst body. reflexivity. }
                          rewrite Hpkt'_eq, <- Hpkt_echo in Ho_orig.
-                         exact (eamo_remove_not_in gs0 pkt Heamo Hbody Hin Ho_orig).
+                         exact (echo_at_most_once_remove_not_in gs0 pkt Hecho_at_most_once Hbody Hin Ho_orig).
                      +++ rewrite Hdst_eq in H. exact (H Hrest).
                  --- rewrite (Hother _ Hne). exact H.
               ** (* pkt' = Echo(self→par0): self ∉ children(par0 in gs').
@@ -5650,7 +5675,7 @@ Proof.
                  exact Hself_not_child_par0.
            ++ (* esif *)
               intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
-              ** apply remove_pkt_in in Ho. assert (H := Hesif pkt' Ho Hbp).
+              ** apply remove_pkt_in in Ho. assert (H := Hecho_src_in_fwds pkt' Ho Hbp).
                  destruct (node_eq (ep_dst pkt') self) as [Hdst_eq | Hne].
                  --- rewrite Hdst_eq. rewrite Hself_par_new. intro Heq2.
                      assert (Hcontra : (proc_of gs0 (ep_dst pkt')).(ps_parent) = Some (ep_src pkt')).
@@ -5658,7 +5683,7 @@ Proof.
                      exact (H Hcontra).
                  --- rewrite (Hother _ Hne). exact H.
               ** subst pkt'. simpl. rewrite (Hother par0 Hpar0_ne_self).
-                 exact (Hnmp self par0 Hself_par_old).
+                 exact (Hno_mutual_parent self par0 Hself_par_old).
            ++ (* pec_ge: self: (pred 1 + S|ch|) = 0 + S|ch| ≥ |act_fwds|=|act_fwds_old| by IH with pending=1. *)
               intros m Hph.
               destruct (node_eq m self) as [-> | Hne].
@@ -5671,10 +5696,10 @@ Proof.
                  rewrite Hag.
                  assert (Hph_old : (proc_of gs0 self).(ps_phase) = Active \/
                                    (proc_of gs0 self).(ps_phase) = Decided) by (left; exact Hself_ph_old).
-                 assert (H := Hpecge self Hph_old).
+                 assert (H := Hpending_count self Hph_old).
                  unfold proc_of in H. rewrite <- Hpeq in H. simpl in H.
                  lia.
-              ** rewrite (Hother m Hne) in Hph. assert (H := Hpecge m Hph).
+              ** rewrite (Hother m Hne) in Hph. assert (H := Hpending_count m Hph).
                  assert (Hag : act_fwds gs' m = act_fwds gs0 m).
                  { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
                  rewrite Hag. rewrite (Hother m Hne). exact H.
@@ -5711,24 +5736,24 @@ Proof.
            assert (Hpkt_echo : pkt = mkPkt sender self Echo).
            { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
            assert (Hetsn_pkt : ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs0))
-             by exact (Hetsn pkt Hin Hbody).
+             by exact (Hecho_token_sender_not pkt Hin Hbody).
            assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
            { intro q. rewrite Hge. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
            refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
-           ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hedni pkt' Hpin Hbp).
+           ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hecho_dst_not_idle pkt' Hpin Hbp).
               destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
               ** rewrite Hself_ph_new. discriminate.
               ** rewrite (Hother _ Hne). exact H.
-           ++ intros pkt' Hpin Hbp. assert (H := Hetsn pkt' (Hmsub pkt' Hpin) Hbp).
+           ++ intros pkt' Hpin Hbp. assert (H := Hecho_token_sender_not pkt' (Hmsub pkt' Hpin) Hbp).
               intro Htin. exact (H (Hmsub _ Htin)).
            ++ intros m c Hch.
               destruct (node_eq m self) as [-> | Hne].
               ** rewrite Hself_ch_new in Hch. simpl in Hch. destruct Hch as [<-|Hrest].
                  --- intro Htin. apply Hmsub in Htin. simpl in Hetsn_pkt. exact (Hetsn_pkt Htin).
-                 --- intro Htin. exact (Hcipt self c Hrest (Hmsub _ Htin)).
-              ** rewrite (Hother m Hne) in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
+                 --- intro Htin. exact (Hchildren_no_parent_token self c Hrest (Hmsub _ Htin)).
+              ** rewrite (Hother m Hne) in Hch. intro Htin. exact (Hchildren_no_parent_token m c Hch (Hmsub _ Htin)).
            ++ intros pkt' Hpin Hbp. assert (Hpin_orig := Hpin). apply Hmsub in Hpin.
-              assert (H := Henic pkt' Hpin Hbp).
+              assert (H := Hecho_not_in_children pkt' Hpin Hbp).
               destruct (node_eq (ep_dst pkt') self) as [Hdst_eq2 | Hne].
               ** rewrite Hdst_eq2. rewrite Hself_ch_new. simpl.
                  intro Hin'. destruct Hin' as [Heqs2|Hrest].
@@ -5737,10 +5762,10 @@ Proof.
                        subst a b c. reflexivity. }
                      rewrite Hge in Hpin_orig. simpl in Hpin_orig.
                      rewrite Hpkt'_eq, <- Hpkt_echo in Hpin_orig.
-                     exact (eamo_remove_not_in gs0 pkt Heamo Hbody Hin Hpin_orig).
+                     exact (echo_at_most_once_remove_not_in gs0 pkt Hecho_at_most_once Hbody Hin Hpin_orig).
                  --- rewrite Hdst_eq2 in H. exact (H Hrest).
               ** rewrite (Hother _ Hne). exact H.
-           ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hesif pkt' Hpin Hbp).
+           ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hecho_src_in_fwds pkt' Hpin Hbp).
               destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
               ** rewrite Hself_par_new. discriminate.
               ** rewrite (Hother _ Hne). exact H.
@@ -5755,11 +5780,11 @@ Proof.
                  rewrite Hag.
                  assert (Hph_old : (proc_of gs0 self).(ps_phase) = Active \/
                                    (proc_of gs0 self).(ps_phase) = Decided) by (left; exact Hself_ph_old).
-                 assert (H := Hpecge self Hph_old).
+                 assert (H := Hpending_count self Hph_old).
                  unfold proc_of in H. rewrite <- Hpeq in H. simpl in H.
                  simpl. apply Nat.eqb_eq in Hone.
                  rewrite Hone in H. simpl in H. exact H.
-              ** rewrite (Hother m Hne) in Hph. assert (H := Hpecge m Hph).
+              ** rewrite (Hother m Hne) in Hph. assert (H := Hpending_count m Hph).
                  assert (Hag : act_fwds gs' m = act_fwds gs0 m).
                  { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
                  rewrite Hag. rewrite (Hother m Hne). exact H.
@@ -5794,34 +5819,34 @@ Proof.
         assert (Hpkt_echo : pkt = mkPkt sender self Echo).
         { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
         assert (Hetsn_pkt : ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs0))
-          by exact (Hetsn pkt Hin Hbody).
+          by exact (Hecho_token_sender_not pkt Hin Hbody).
         assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
         { intro q. rewrite Hge. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
         refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
-        ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hedni pkt' Hpin Hbp).
+        ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hecho_dst_not_idle pkt' Hpin Hbp).
            destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
            ** rewrite Hself_ph_new. discriminate.
            ** rewrite (Hother _ Hne). exact H.
-        ++ intros pkt' Hpin Hbp. assert (H := Hetsn pkt' (Hmsub pkt' Hpin) Hbp).
+        ++ intros pkt' Hpin Hbp. assert (H := Hecho_token_sender_not pkt' (Hmsub pkt' Hpin) Hbp).
            intro Htin. exact (H (Hmsub _ Htin)).
         ++ intros m c Hch.
            destruct (node_eq m self) as [-> | Hne].
            ** rewrite Hself_ch_new in Hch. simpl in Hch. destruct Hch as [<-|Hrest].
               --- intro Htin. apply Hmsub in Htin. simpl in Hetsn_pkt. exact (Hetsn_pkt Htin).
-              --- intro Htin. exact (Hcipt self c Hrest (Hmsub _ Htin)).
-           ** rewrite (Hother m Hne) in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
+              --- intro Htin. exact (Hchildren_no_parent_token self c Hrest (Hmsub _ Htin)).
+           ** rewrite (Hother m Hne) in Hch. intro Htin. exact (Hchildren_no_parent_token m c Hch (Hmsub _ Htin)).
         ++ intros pkt' Hpin Hbp. assert (Hpin_orig := Hpin). apply Hmsub in Hpin.
-           assert (H := Henic pkt' Hpin Hbp).
+           assert (H := Hecho_not_in_children pkt' Hpin Hbp).
            destruct (node_eq (ep_dst pkt') self) as [Hdst3 | Hne].
            ** rewrite Hdst3. rewrite Hself_ch_new. simpl. intro Hin'. destruct Hin' as [Heqs3|Hrest].
               --- assert (Hpkt'_eq : pkt' = mkPkt sender self Echo).
                   { destruct pkt' as [a b c]. simpl in Heqs3, Hdst3, Hbp |- *. subst a b c. reflexivity. }
                   rewrite Hge in Hpin_orig. simpl in Hpin_orig.
                   rewrite Hpkt'_eq, <- Hpkt_echo in Hpin_orig.
-                  exact (eamo_remove_not_in gs0 pkt Heamo Hbody Hin Hpin_orig).
+                  exact (echo_at_most_once_remove_not_in gs0 pkt Hecho_at_most_once Hbody Hin Hpin_orig).
               --- rewrite Hdst3 in H. exact (H Hrest).
            ** rewrite (Hother _ Hne). exact H.
-        ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hesif pkt' Hpin Hbp).
+        ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hecho_src_in_fwds pkt' Hpin Hbp).
            destruct (node_eq (ep_dst pkt') self) as [Hdst3 | Hne].
            ** (* esif for self *)
               intro Heq. apply H. rewrite Hdst3.
@@ -5840,9 +5865,9 @@ Proof.
               rewrite Hag.
               assert (Hph_old : (proc_of gs0 self).(ps_phase) = Active \/
                                 (proc_of gs0 self).(ps_phase) = Decided) by (left; exact Hself_ph_old).
-              assert (H := Hpecge self Hph_old).
+              assert (H := Hpending_count self Hph_old).
               unfold proc_of in H. rewrite <- Hpeq in H. simpl in H. lia.
-           ** rewrite (Hother m Hne) in Hph. assert (H := Hpecge m Hph).
+           ** rewrite (Hother m Hne) in Hph. assert (H := Hpending_count m Hph).
               assert (Hag : act_fwds gs' m = act_fwds gs0 m).
               { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
               rewrite Hag. rewrite (Hother m Hne). exact H.
@@ -5856,20 +5881,22 @@ Proof.
       { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
         rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
       refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hedni pkt' (Hmsub pkt' Hpin) Hbp).
-      * intros pkt' Hpin Hbp. intro Htin. exact (Hetsn pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
-      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Henic pkt' (Hmsub pkt' Hpin) Hbp).
-      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hesif pkt' (Hmsub pkt' Hpin) Hbp).
-      * intros m Hph. rewrite Hprf in Hph. assert (H := Hpecge m Hph).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_dst_not_idle pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. intro Htin. exact (Hecho_token_sender_not pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
+      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hchildren_no_parent_token m c Hch (Hmsub _ Htin)).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_not_in_children pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hecho_src_in_fwds pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros m Hph. rewrite Hprf in Hph. assert (H := Hpending_count m Hph).
         assert (Hag : act_fwds gs' m = act_fwds gs0 m) by
           (apply act_fwds_parent_agree; rewrite Hprf; reflexivity).
         rewrite Hag. rewrite Hprf. exact H.
 Qed.
 
-(** Now use the combined step to prove each _holds theorem. *)
-(** Combined theorem for all new invariants. *)
-Definition new_inv_combined (gs : EState) : Prop :=
+(** The invariants are proved together as [token_echo_accounting] because their
+    step-case proofs mutually depend on each other (e.g. [pending_exact_count_ge]
+    needs [echo_src_in_fwds] and [echo_not_in_children] in the Echo/Active case).
+    We use [invariant_by_induction] with a 19-component conjunction. *)
+Definition token_echo_accounting (gs : EState) : Prop :=
   echo_dst_not_idle gs /\ echo_token_sender_not gs /\
   children_implies_no_parent_token gs /\ echo_not_in_children gs /\
   echo_src_in_fwds gs /\ pending_exact_count_ge gs /\
@@ -5880,11 +5907,11 @@ Definition new_inv_combined (gs : EState) : Prop :=
   token_dst_not_parent gs /\ no_mutual_parent_prop gs /\ INV gs /\
   echo_at_most_once gs.
 
-Theorem new_inv_combined_holds : is_invariant ELts new_inv_combined.
+Theorem token_echo_accounting_holds : is_invariant ELts token_echo_accounting.
 Proof.
   apply invariant_by_induction.
   - intros gs Hi.
-    unfold new_inv_combined.
+    unfold token_echo_accounting.
     refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
     + intros p H _. rewrite (proj2 Hi) in H. contradiction.
     + intros p H _. rewrite (proj2 Hi) in H. contradiction.
@@ -5892,68 +5919,68 @@ Proof.
     + intros p H _. rewrite (proj2 Hi) in H. contradiction.
     + intros p H _. rewrite (proj2 Hi) in H. contradiction.
     + intros m [H|H]; unfold proc_of in H; rewrite (proj1 Hi m) in H; simpl in H; discriminate.
-    + exact (ppa_init gs Hi).
-    + exact (tamo_init gs Hi).
-    + exact (tfpc_init gs Hi).
-    + exact (pia_init gs Hi).
-    + exact (inic_init gs Hi).
-    + exact (tsni_init gs Hi).
-    + exact (esni_init gs Hi).
-    + exact (proj1 (pnpian_init gs Hi)).
-    + exact (proj2 (pnpian_init gs Hi)).
+    + exact (pending_pos_active_base gs Hi).
+    + exact (token_at_most_once_base gs Hi).
+    + exact (token_from_parent_consumed_base gs Hi).
+    + exact (parent_is_active_base gs Hi).
+    + exact (idle_not_in_children_base gs Hi).
+    + exact (token_src_not_idle_base gs Hi).
+    + exact (echo_src_not_idle_base gs Hi).
+    + exact (proj1 (pkt_nodes_in_all_nodes_base gs Hi)).
+    + exact (proj2 (pkt_nodes_in_all_nodes_base gs Hi)).
     + intros p H _. rewrite (proj2 Hi) in H. contradiction.
     + intros m par H. unfold proc_of in H. rewrite (proj1 Hi) in H. simpl in H. discriminate.
     + exact (INV_init gs Hi).
     + intros p _. rewrite (proj2 Hi) in *. unfold count_pkt. simpl. exact (Nat.le_0_l _).
   - intros gs lbl gs'
-      [Hedni [Hetsn [Hcipt [Henic [Hesif [Hpecge
-      [Hppa [Htamo [Htfpc [Hpia [Hinic [Htsni [Hesni [Hpnian [Hpian
-      [Htdnp [Hnmp [Hinv Heamo]]]]]]]]]]]]]]]]]] Hstep.
-    unfold new_inv_combined.
-    destruct (new_inv_combined_step gs lbl gs' Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
-              Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep)
-      as [Hedni' [Hetsn' [Hcipt' [Henic' [Hesif' Hpecge']]]]].
-    refine (conj Hedni' (conj Hetsn' (conj Hcipt' (conj Henic' (conj Hesif' (conj Hpecge'
+      [Hecho_dst_not_idle [Hecho_token_sender_not [Hchildren_no_parent_token [Hecho_not_in_children [Hecho_src_in_fwds [Hpending_count
+      [Hpending_pos [Htoken_at_most_once [Htoken_from_parent [Hparent_active [Hidle_not_in_children [Htoken_src_not_idle [Hecho_src_not_idle [Hpkt_in_all_nodes [Hparent_in_all_nodes
+      [Htoken_dst_not_parent [Hno_mutual_parent [Hinv Hecho_at_most_once]]]]]]]]]]]]]]]]]] Hstep.
+    unfold token_echo_accounting.
+    destruct (token_echo_accounting_step gs lbl gs' Hecho_dst_not_idle Hecho_token_sender_not Hchildren_no_parent_token Hecho_not_in_children Hecho_src_in_fwds Hpending_count Hecho_at_most_once
+              Hpending_pos Htoken_at_most_once Htoken_from_parent Hparent_active Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hpkt_in_all_nodes Hparent_in_all_nodes Htoken_dst_not_parent Hno_mutual_parent Hinv Hstep)
+      as [Hecho_dst_not_idle' [Hecho_token_sender_not' [Hchildren_no_parent_token' [Hecho_not_in_children' [Hecho_src_in_fwds' Hpending_count']]]]].
+    refine (conj Hecho_dst_not_idle' (conj Hecho_token_sender_not' (conj Hchildren_no_parent_token' (conj Hecho_not_in_children' (conj Hecho_src_in_fwds' (conj Hpending_count'
       (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
-    + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+    + exact (pending_pos_active_step gs lbl gs' Hpending_pos Htoken_from_parent Hidle_not_in_children Hecho_src_not_idle
                       (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
-    + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
-    + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
-    + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
-    + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
-    + exact (tsni_step gs lbl gs' Htsni Hstep).
-    + exact (esni_step gs lbl gs' Hesni Hstep).
-    + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-    + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-    + exact (tdnp_step gs lbl gs' Htdnp Htsni Hstep).
-    + exact (nmp_step gs lbl gs' Hnmp Hpia Hpnian (proj1 (proj2 (proj2 Hinv))) Hstep).
+    + exact (token_at_most_once_step gs lbl gs' Htoken_at_most_once Htoken_src_not_idle Hstep).
+    + exact (token_from_parent_consumed_step gs lbl gs' Htoken_at_most_once Htoken_from_parent Hparent_active Hstep).
+    + exact (parent_is_active_step gs lbl gs' Hparent_active Htoken_src_not_idle Hstep).
+    + exact (idle_not_in_children_step gs lbl gs' Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hstep).
+    + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep).
+    + exact (echo_src_not_idle_step gs lbl gs' Hecho_src_not_idle Hstep).
+    + exact (proj1 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+    + exact (proj2 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+    + exact (token_dst_not_parent_step gs lbl gs' Htoken_dst_not_parent Htoken_src_not_idle Hstep).
+    + exact (no_mutual_parent_step gs lbl gs' Hno_mutual_parent Hparent_active Hpkt_in_all_nodes (proj1 (proj2 (proj2 Hinv))) Hstep).
     + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hpin Heq].
       * exact (INV_step_start gs0 Hinv Hph).
       * exact (INV_step_deliver gs0 pkt gs0' Hinv Hpin Heq).
-    + exact (eamo_step gs lbl gs' Heamo Hesni Hetsn Hppa Hstep).
+    + exact (echo_at_most_once_step gs lbl gs' Hecho_at_most_once Hecho_src_not_idle Hecho_token_sender_not Hpending_pos Hstep).
 Qed.
 
 Theorem echo_dst_not_idle_holds : is_invariant ELts echo_dst_not_idle.
-Proof. intros gs Hr. exact (proj1 (new_inv_combined_holds gs Hr)). Qed.
+Proof. intros gs Hr. exact (proj1 (token_echo_accounting_holds gs Hr)). Qed.
 
 Theorem echo_token_sender_not_holds : is_invariant ELts echo_token_sender_not.
-Proof. intros gs Hr. exact (proj1 (proj2 (new_inv_combined_holds gs Hr))). Qed.
+Proof. intros gs Hr. exact (proj1 (proj2 (token_echo_accounting_holds gs Hr))). Qed.
 
 Theorem children_implies_no_parent_token_holds : is_invariant ELts children_implies_no_parent_token.
-Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (new_inv_combined_holds gs Hr)))). Qed.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (token_echo_accounting_holds gs Hr)))). Qed.
 
 Theorem echo_not_in_children_holds : is_invariant ELts echo_not_in_children.
-Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr))))). Qed.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (token_echo_accounting_holds gs Hr))))). Qed.
 
 Theorem echo_src_in_fwds_holds : is_invariant ELts echo_src_in_fwds.
-Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr)))))). Qed.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (proj2 (token_echo_accounting_holds gs Hr)))))). Qed.
 
 Theorem pending_exact_count_ge_holds : is_invariant ELts pending_exact_count_ge.
-Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr))))))). Qed.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (proj2 (proj2 (token_echo_accounting_holds gs Hr))))))). Qed.
 
 Theorem echo_at_most_once_holds : is_invariant ELts echo_at_most_once.
 Proof.
-  intros gs Hr. exact (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr))))))))))))))))))).
+  intros gs Hr. exact (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (token_echo_accounting_holds gs Hr))))))))))))))))))).
 Qed.
 
 (* ================================================================== *)
@@ -6046,7 +6073,7 @@ Lemma ndc_step gs lbl gs' :
     nodup_children_inv gs -> echo_not_in_children gs -> token_at_most_once gs ->
     lts_trans ELts gs lbl gs' -> nodup_children_inv gs'.
 Proof.
-  intros Hndc Henic Htamo Hstep.
+  intros Hndc Hecho_not_in_children Htoken_at_most_once Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
   - (* step_start: init.children = [] *)
     set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
@@ -6102,7 +6129,7 @@ Proof.
               destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
               simpl. unfold np. simpl. constructor.
               ** (* sender ∉ ps_children p *)
-                 intro Hch. exact (Henic pkt Hin Hbody Hch).
+                 intro Hch. exact (Hecho_not_in_children pkt Hin Hbody Hch).
               ** exact (Hndc self).
            ++ rewrite Hge, proc_of_upd.
               destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
@@ -6118,7 +6145,7 @@ Proof.
               ** intro Hch.
                  assert (Hpkt_eq : pkt = mkPkt sender self Echo).
                  { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-                 exact (Henic pkt Hin Hbody Hch).
+                 exact (Hecho_not_in_children pkt Hin Hbody Hch).
               ** exact (Hndc self).
            ++ rewrite Hge, proc_of_upd.
               destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
@@ -6134,7 +6161,7 @@ Proof.
            ** intro Hch.
               assert (Hpkt_eq : pkt = mkPkt sender self Echo).
               { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
-              exact (Henic pkt Hin Hbody Hch).
+              exact (Hecho_not_in_children pkt Hin Hbody Hch).
            ** exact (Hndc self).
         ++ rewrite Hge, proc_of_upd.
            destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
@@ -6163,42 +6190,42 @@ Proof.
       refine (conj (ndc_init gs Hi) _).
       refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
       all: first [
-        exact (ppa_init gs Hi) | exact (tamo_init gs Hi) | exact (tfpc_init gs Hi) |
-        exact (pia_init gs Hi) | exact (inic_init gs Hi) | exact (tsni_init gs Hi) |
-        exact (esni_init gs Hi) | exact (INV_init gs Hi) | exact (eamo_init gs Hi) |
-        exact (nmp_init gs Hi) | exact (tdnp_init gs Hi) |
-        exact (proj1 (pnpian_init gs Hi)) | exact (proj2 (pnpian_init gs Hi)) |
+        exact (pending_pos_active_base gs Hi) | exact (token_at_most_once_base gs Hi) | exact (token_from_parent_consumed_base gs Hi) |
+        exact (parent_is_active_base gs Hi) | exact (idle_not_in_children_base gs Hi) | exact (token_src_not_idle_base gs Hi) |
+        exact (echo_src_not_idle_base gs Hi) | exact (INV_init gs Hi) | exact (echo_at_most_once_base gs Hi) |
+        exact (no_mutual_parent_base gs Hi) | exact (token_dst_not_parent_base gs Hi) |
+        exact (proj1 (pkt_nodes_in_all_nodes_base gs Hi)) | exact (proj2 (pkt_nodes_in_all_nodes_base gs Hi)) |
         (intros p H _; rewrite (proj2 Hi) in H; contradiction) |
         (intros m c H H'; rewrite (proj2 Hi) in H'; contradiction) |
         (intros m [H|H]; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate) |
         (intros m par H; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate)
       ].
     - intros gs lbl gs'
-        [Hndc [Hedni [Hetsn [Hcipt [Henic [Hesif [Hpecge
-        [Hppa [Htamo [Htfpc [Hpia [Hinic [Htsni [Hesni [Hpnian [Hpian
-        [Htdnp [Hnmp [Hinv Heamo]]]]]]]]]]]]]]]]]]] Hstep.
-      destruct (new_inv_combined_step gs lbl gs' Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
-                Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep)
-        as [Hedni' [Hetsn' [Hcipt' [Henic' [Hesif' Hpecge']]]]].
-      refine (conj _ (conj Hedni' (conj Hetsn' (conj Hcipt' (conj Henic' (conj Hesif' (conj Hpecge'
+        [Hndc [Hecho_dst_not_idle [Hecho_token_sender_not [Hchildren_no_parent_token [Hecho_not_in_children [Hecho_src_in_fwds [Hpending_count
+        [Hpending_pos [Htoken_at_most_once [Htoken_from_parent [Hparent_active [Hidle_not_in_children [Htoken_src_not_idle [Hecho_src_not_idle [Hpkt_in_all_nodes [Hparent_in_all_nodes
+        [Htoken_dst_not_parent [Hno_mutual_parent [Hinv Hecho_at_most_once]]]]]]]]]]]]]]]]]]] Hstep.
+      destruct (token_echo_accounting_step gs lbl gs' Hecho_dst_not_idle Hecho_token_sender_not Hchildren_no_parent_token Hecho_not_in_children Hecho_src_in_fwds Hpending_count Hecho_at_most_once
+                Hpending_pos Htoken_at_most_once Htoken_from_parent Hparent_active Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hpkt_in_all_nodes Hparent_in_all_nodes Htoken_dst_not_parent Hno_mutual_parent Hinv Hstep)
+        as [Hecho_dst_not_idle' [Hecho_token_sender_not' [Hchildren_no_parent_token' [Hecho_not_in_children' [Hecho_src_in_fwds' Hpending_count']]]]].
+      refine (conj _ (conj Hecho_dst_not_idle' (conj Hecho_token_sender_not' (conj Hchildren_no_parent_token' (conj Hecho_not_in_children' (conj Hecho_src_in_fwds' (conj Hpending_count'
         (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _))))))))))))))))))).
-      + exact (ndc_step gs lbl gs' Hndc Henic Htamo Hstep).
-      + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+      + exact (ndc_step gs lbl gs' Hndc Hecho_not_in_children Htoken_at_most_once Hstep).
+      + exact (pending_pos_active_step gs lbl gs' Hpending_pos Htoken_from_parent Hidle_not_in_children Hecho_src_not_idle
                         (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
-      + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
-      + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
-      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
-      + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
-      + exact (tsni_step gs lbl gs' Htsni Hstep).
-      + exact (esni_step gs lbl gs' Hesni Hstep).
-      + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-      + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-      + exact (tdnp_step gs lbl gs' Htdnp Htsni Hstep).
-      + exact (nmp_step gs lbl gs' Hnmp Hpia Hpnian (proj1 (proj2 (proj2 Hinv))) Hstep).
+      + exact (token_at_most_once_step gs lbl gs' Htoken_at_most_once Htoken_src_not_idle Hstep).
+      + exact (token_from_parent_consumed_step gs lbl gs' Htoken_at_most_once Htoken_from_parent Hparent_active Hstep).
+      + exact (parent_is_active_step gs lbl gs' Hparent_active Htoken_src_not_idle Hstep).
+      + exact (idle_not_in_children_step gs lbl gs' Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hstep).
+      + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep).
+      + exact (echo_src_not_idle_step gs lbl gs' Hecho_src_not_idle Hstep).
+      + exact (proj1 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+      + exact (proj2 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+      + exact (token_dst_not_parent_step gs lbl gs' Htoken_dst_not_parent Htoken_src_not_idle Hstep).
+      + exact (no_mutual_parent_step gs lbl gs' Hno_mutual_parent Hparent_active Hpkt_in_all_nodes (proj1 (proj2 (proj2 Hinv))) Hstep).
       + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hin Heq].
         * exact (INV_step_start gs0 Hinv Hph).
         * exact (INV_step_deliver gs0 pkt gs0' Hinv Hin Heq).
-      + exact (eamo_step gs lbl gs' Heamo Hesni Hetsn Hppa Hstep). }
+      + exact (echo_at_most_once_step gs lbl gs' Hecho_at_most_once Hecho_src_not_idle Hecho_token_sender_not Hpending_pos Hstep). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -6229,7 +6256,7 @@ Lemma cian_step gs lbl gs' :
     lts_trans ELts gs lbl gs' ->
     children_in_all_nodes gs'.
 Proof.
-  intros Hcian Hpnian Hstep.
+  intros Hcian Hpkt_in_all_nodes Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
   - (* step_start: init.children=[], others unchanged *)
     set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
@@ -6285,7 +6312,7 @@ Proof.
            destruct (node_eq self m) as [<-|Hne].
            ++ simpl in Hch. unfold np in Hch. simpl in Hch.
               destruct Hch as [<- | Hrest].
-              ** exact (proj1 (Hpnian pkt Hin)).
+              ** exact (proj1 (Hpkt_in_all_nodes pkt Hin)).
               ** exact (Hcian self c Hrest).
            ++ unfold proc_of in Hch. exact (Hcian m c Hch).
         -- set (dec := mkProc Decided None 0 (sender :: ps_children p)).
@@ -6296,7 +6323,7 @@ Proof.
            destruct (node_eq self m) as [<-|Hne].
            ++ simpl in Hch. unfold dec in Hch. simpl in Hch.
               destruct Hch as [<- | Hrest].
-              ** exact (proj1 (Hpnian pkt Hin)).
+              ** exact (proj1 (Hpkt_in_all_nodes pkt Hin)).
               ** exact (Hcian self c Hrest).
            ++ unfold proc_of in Hch. exact (Hcian m c Hch).
       * set (np := mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
@@ -6307,7 +6334,7 @@ Proof.
         destruct (node_eq self m) as [<-|Hne].
         ++ simpl in Hch. unfold np in Hch. simpl in Hch.
            destruct Hch as [<- | Hrest].
-           ** exact (proj1 (Hpnian pkt Hin)).
+           ** exact (proj1 (Hpkt_in_all_nodes pkt Hin)).
            ** exact (Hcian self c Hrest).
         ++ unfold proc_of in Hch. exact (Hcian m c Hch).
     + assert (Hpr : es_procs gs' = es_procs gs0).
@@ -6320,13 +6347,13 @@ Proof.
   assert (Hcomb : is_invariant ELts
     (fun gs => children_in_all_nodes gs /\ pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs)).
   { apply invariant_by_induction.
-    - intros gs Hi. refine (conj _ (conj (proj1 (pnpian_init gs Hi)) (proj2 (pnpian_init gs Hi)))).
+    - intros gs Hi. refine (conj _ (conj (proj1 (pkt_nodes_in_all_nodes_base gs Hi)) (proj2 (pkt_nodes_in_all_nodes_base gs Hi)))).
       intros m c H. rewrite (proj1 Hi) in H. simpl in H. contradiction.
-    - intros gs lbl gs' [Hcian [Hpnian Hpian]] Hstep.
+    - intros gs lbl gs' [Hcian [Hpkt_in_all_nodes Hparent_in_all_nodes]] Hstep.
       refine (conj _ (conj _ _)).
-      + exact (cian_step gs lbl gs' Hcian Hpnian Hstep).
-      + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-      + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)). }
+      + exact (cian_step gs lbl gs' Hcian Hpkt_in_all_nodes Hstep).
+      + exact (proj1 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+      + exact (proj2 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -6339,11 +6366,11 @@ Definition children_parent_ne (gs : EState) : Prop :=
   forall m c, In c (proc_of gs m).(ps_children) ->
     (proc_of gs m).(ps_parent) <> Some c.
 
-Lemma cpne_step gs lbl gs' :
+Lemma children_parent_ne_step gs lbl gs' :
     children_parent_ne gs -> echo_src_in_fwds gs ->
     lts_trans ELts gs lbl gs' -> children_parent_ne gs'.
 Proof.
-  intros Hcpne Hesif Hstep.
+  intros Hcpne Hecho_src_in_fwds Hstep.
   destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
   - (* step_start *)
     set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
@@ -6406,8 +6433,8 @@ Proof.
                      parent(self in gs0) = Some par0 (Hpar0). So par0 ≠ sender. ✓ *)
                  intro Heq. injection Heq as Heq'.
                  (* Heq' : par0 = sender = ep_src pkt *)
-                 (* Hesif says: ep_dst pkt = self, ep_src pkt = sender, so parent(self) ≠ Some sender *)
-                 assert (H := Hesif pkt Hin Hbody).
+                 (* Hecho_src_in_fwds says: ep_dst pkt = self, ep_src pkt = sender, so parent(self) ≠ Some sender *)
+                 assert (H := Hecho_src_in_fwds pkt Hin Hbody).
                  (* H : (proc_of gs0 (ep_dst pkt)).(ps_parent) <> Some (ep_src pkt) *)
                  (* = parent(self).(gs0) <> Some sender *)
                  assert (Hpar_self : (proc_of gs0 self).(ps_parent) = Some (ep_src pkt)).
@@ -6438,7 +6465,7 @@ Proof.
            destruct Hch as [<- | Hrest].
            ** (* c = sender: parent(self in gs') = ps_parent p. Need ps_parent p ≠ Some sender.
                   From esif: parent(self in gs0)=(proc_of gs0 self).(ps_parent)=ps_parent p ≠ Some sender. *)
-              assert (H := Hesif pkt Hin Hbody). simpl in H.
+              assert (H := Hecho_src_in_fwds pkt Hin Hbody). simpl in H.
               intro Heq. apply H.
               unfold proc_of. change (es_procs gs0 self) with p. exact Heq.
            ** exact (Hcpne self c Hrest).
@@ -6467,42 +6494,42 @@ Proof.
       + intros m c H. rewrite (proj1 Hi) in H. simpl in H. contradiction.
       + refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
         all: first [
-          exact (ppa_init gs Hi) | exact (tamo_init gs Hi) | exact (tfpc_init gs Hi) |
-          exact (pia_init gs Hi) | exact (inic_init gs Hi) | exact (tsni_init gs Hi) |
-          exact (esni_init gs Hi) | exact (INV_init gs Hi) | exact (eamo_init gs Hi) |
-          exact (nmp_init gs Hi) | exact (tdnp_init gs Hi) |
-          exact (proj1 (pnpian_init gs Hi)) | exact (proj2 (pnpian_init gs Hi)) |
+          exact (pending_pos_active_base gs Hi) | exact (token_at_most_once_base gs Hi) | exact (token_from_parent_consumed_base gs Hi) |
+          exact (parent_is_active_base gs Hi) | exact (idle_not_in_children_base gs Hi) | exact (token_src_not_idle_base gs Hi) |
+          exact (echo_src_not_idle_base gs Hi) | exact (INV_init gs Hi) | exact (echo_at_most_once_base gs Hi) |
+          exact (no_mutual_parent_base gs Hi) | exact (token_dst_not_parent_base gs Hi) |
+          exact (proj1 (pkt_nodes_in_all_nodes_base gs Hi)) | exact (proj2 (pkt_nodes_in_all_nodes_base gs Hi)) |
           (intros p H _; rewrite (proj2 Hi) in H; contradiction) |
           (intros m c H H'; rewrite (proj2 Hi) in H'; contradiction) |
           (intros m [H|H]; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate) |
           (intros m par H; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate)
         ].
     - intros gs lbl gs'
-        [Hcpne [Hedni [Hetsn [Hcipt [Henic [Hesif [Hpecge
-        [Hppa [Htamo [Htfpc [Hpia [Hinic [Htsni [Hesni [Hpnian [Hpian
-        [Htdnp [Hnmp [Hinv Heamo]]]]]]]]]]]]]]]]]]] Hstep.
-      destruct (new_inv_combined_step gs lbl gs' Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
-                Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep)
-        as [Hedni' [Hetsn' [Hcipt' [Henic' [Hesif' Hpecge']]]]].
-      refine (conj _ (conj Hedni' (conj Hetsn' (conj Hcipt' (conj Henic' (conj Hesif' (conj Hpecge'
+        [Hcpne [Hecho_dst_not_idle [Hecho_token_sender_not [Hchildren_no_parent_token [Hecho_not_in_children [Hecho_src_in_fwds [Hpending_count
+        [Hpending_pos [Htoken_at_most_once [Htoken_from_parent [Hparent_active [Hidle_not_in_children [Htoken_src_not_idle [Hecho_src_not_idle [Hpkt_in_all_nodes [Hparent_in_all_nodes
+        [Htoken_dst_not_parent [Hno_mutual_parent [Hinv Hecho_at_most_once]]]]]]]]]]]]]]]]]]] Hstep.
+      destruct (token_echo_accounting_step gs lbl gs' Hecho_dst_not_idle Hecho_token_sender_not Hchildren_no_parent_token Hecho_not_in_children Hecho_src_in_fwds Hpending_count Hecho_at_most_once
+                Hpending_pos Htoken_at_most_once Htoken_from_parent Hparent_active Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hpkt_in_all_nodes Hparent_in_all_nodes Htoken_dst_not_parent Hno_mutual_parent Hinv Hstep)
+        as [Hecho_dst_not_idle' [Hecho_token_sender_not' [Hchildren_no_parent_token' [Hecho_not_in_children' [Hecho_src_in_fwds' Hpending_count']]]]].
+      refine (conj _ (conj Hecho_dst_not_idle' (conj Hecho_token_sender_not' (conj Hchildren_no_parent_token' (conj Hecho_not_in_children' (conj Hecho_src_in_fwds' (conj Hpending_count'
         (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _))))))))))))))))))).
-      + exact (cpne_step gs lbl gs' Hcpne Hesif Hstep).
-      + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+      + exact (children_parent_ne_step gs lbl gs' Hcpne Hecho_src_in_fwds Hstep).
+      + exact (pending_pos_active_step gs lbl gs' Hpending_pos Htoken_from_parent Hidle_not_in_children Hecho_src_not_idle
                         (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
-      + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
-      + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
-      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
-      + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
-      + exact (tsni_step gs lbl gs' Htsni Hstep).
-      + exact (esni_step gs lbl gs' Hesni Hstep).
-      + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-      + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
-      + exact (tdnp_step gs lbl gs' Htdnp Htsni Hstep).
-      + exact (nmp_step gs lbl gs' Hnmp Hpia Hpnian (proj1 (proj2 (proj2 Hinv))) Hstep).
+      + exact (token_at_most_once_step gs lbl gs' Htoken_at_most_once Htoken_src_not_idle Hstep).
+      + exact (token_from_parent_consumed_step gs lbl gs' Htoken_at_most_once Htoken_from_parent Hparent_active Hstep).
+      + exact (parent_is_active_step gs lbl gs' Hparent_active Htoken_src_not_idle Hstep).
+      + exact (idle_not_in_children_step gs lbl gs' Hidle_not_in_children Htoken_src_not_idle Hecho_src_not_idle Hstep).
+      + exact (token_src_not_idle_step gs lbl gs' Htoken_src_not_idle Hstep).
+      + exact (echo_src_not_idle_step gs lbl gs' Hecho_src_not_idle Hstep).
+      + exact (proj1 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+      + exact (proj2 (pkt_nodes_in_all_nodes_step gs lbl gs' Hpkt_in_all_nodes Hparent_in_all_nodes Hstep)).
+      + exact (token_dst_not_parent_step gs lbl gs' Htoken_dst_not_parent Htoken_src_not_idle Hstep).
+      + exact (no_mutual_parent_step gs lbl gs' Hno_mutual_parent Hparent_active Hpkt_in_all_nodes (proj1 (proj2 (proj2 Hinv))) Hstep).
       + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hin Heq].
         * exact (INV_step_start gs0 Hinv Hph).
         * exact (INV_step_deliver gs0 pkt gs0' Hinv Hin Heq).
-      + exact (eamo_step gs lbl gs' Heamo Hesni Hetsn Hppa Hstep). }
+      + exact (echo_at_most_once_step gs lbl gs' Hecho_at_most_once Hecho_src_not_idle Hecho_token_sender_not Hpending_pos Hstep). }
   intros gs Hr. exact (proj1 (Hcomb gs Hr)).
 Qed.
 
@@ -6512,8 +6539,8 @@ Proof.
   set (children := (proc_of gs m).(ps_children)).
   set (act := act_fwds gs m).
   set (pending := (proc_of gs m).(ps_pending)).
-  assert (Hpecge := pending_exact_count_ge_holds gs Hr m Hph).
-  fold children act pending in Hpecge.
+  assert (Hpending_count := pending_exact_count_ge_holds gs Hr m Hph).
+  fold children act pending in Hpending_count.
   assert (Hcif : forall c, In c children -> In c act).
   { intros c Hch. unfold act, children.
     apply act_fwds_spec. split; [| split].
@@ -6535,7 +6562,12 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** *** pending_propagates and pending_chain_to_initiator *)
+(** *** pending_propagates and pending_chain_to_initiator
+
+    Starting from any Active node m with pending >= 1, repeatedly apply
+    [pending_propagates] along the parent chain.  The chain reaches the
+    initiator in finitely many steps (by [active_non_init_has_chain]).
+    Therefore pending(initiator) >= 1. *)
 
 Lemma pending_propagates :
   forall gs, reachable ELts gs ->
