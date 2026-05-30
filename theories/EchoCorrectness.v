@@ -29,31 +29,8 @@ Variable nodup_nodes        : NoDup all_nodes.
     Idle set (it becomes Active after step_start) strictly decreases the
     count. *)
 
-(** A3. Reliable message delivery.
-    Any packet that is in the bag of an reachable state will eventually
-    be delivered: there exists a later reachable state from which the
-    delivery step has been taken.  This is a fairness / scheduling axiom
-    and is NOT derivable from the LTS structure alone.
-
-    Formally: if [gs] is reachable and [pkt ∈ gs.(es_msgs)], then
-    there exists a reachable [gs'] such that [step_deliver pkt] fires. *)
 Let ELts   := echo_LTS node node_eq initiator all_nodes adj.
 Let EState := @echo_state node.
-
-Variable reliable_delivery :
-  forall gs pkt,
-    reachable ELts gs ->
-    In pkt (es_msgs gs) ->
-    exists gs_mid gs_after,
-      reachable ELts gs_mid /\
-      In pkt (es_msgs gs_mid) /\
-      lts_trans ELts gs_mid (ELDeliver pkt) gs_after.
-
-(** Why this helps [decided_reaches_initiator]:
-    Without reliable delivery the Token wave might stall (a packet sits
-    in the bag forever).  With it we can argue by induction on the
-    spanning-tree depth that every node eventually goes Active and sets
-    its parent, which is what decided_reaches_initiator needs. *)
 
 Definition proc_of (gs : EState) (n : node) : @proc_state node :=
   gs.(es_procs) n.
@@ -3974,7 +3951,7 @@ Qed.
 Lemma count_pkt_app pkt l1 l2 :
     count_pkt pkt (l1 ++ l2) = count_pkt pkt l1 + count_pkt pkt l2.
 Proof.
-  unfold count_pkt. rewrite filter_app. rewrite app_length. reflexivity.
+  unfold count_pkt. rewrite filter_app. rewrite length_app. reflexivity.
 Qed.
 
 (** remove_pkt pkt removes exactly the first element matching pkt. *)
@@ -6048,7 +6025,7 @@ Proof.
     rewrite Hfilter_hdtl_hd.
     rewrite Hact2_ext.
     (* goal: S (length tl) = length (filter tl act1 ++ hd :: filter tl act2) *)
-    rewrite app_length. rewrite app_length in IH'.
+    rewrite length_app. rewrite length_app in IH'.
     simpl length. simpl length in IH'.
     lia.
 Qed.
@@ -6684,19 +6661,20 @@ Proof.
   rewrite Hzero in Hpend_init. inversion Hpend_init.
 Qed.
 
-(** Wave-depth axioms for the token propagation argument.
-    [wave_depth n] is n's depth in the BFS spanning tree rooted at [initiator].
-    These encode the fact that the token wave propagates strictly outward
-    (depth strictly increases along forward Token edges) and that the
-    initiator sits at depth 0. *)
+(** BFS spanning tree rooted at [initiator].
+    [wave_depth n] is the depth of n in the tree; every non-initiator has
+    a neighbor of strictly smaller depth (graph connectivity). *)
 Variable wave_depth : node -> nat.
-Variable wave_depth_initiator : wave_depth initiator = 0.
-
-(** Every non-initiator node in all_nodes has a neighbor of strictly smaller depth.
-    This captures connectivity: you can always find a path toward the initiator. *)
-Variable wave_depth_nbr :
+Variable wave_depth_props :
+  wave_depth initiator = 0 /\
   forall n, In n all_nodes -> n <> initiator ->
     exists m, In m all_nodes /\ adj n m = true /\ wave_depth m < wave_depth n.
+
+Definition wave_depth_initiator : wave_depth initiator = 0 := proj1 wave_depth_props.
+Definition wave_depth_nbr :
+  forall n, In n all_nodes -> n <> initiator ->
+    exists m, In m all_nodes /\ adj n m = true /\ wave_depth m < wave_depth n :=
+  proj2 wave_depth_props.
 
 (** The one-hop causal fact: proved from token_sent_or_notidle, parent_is_active,
     and no_token_idle_decided. *)
