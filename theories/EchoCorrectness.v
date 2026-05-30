@@ -1,6 +1,6 @@
 (** * Correctness of the Echo Algorithm — full proofs *)
 
-From Stdlib Require Import List Arith Bool Arith.Wf_nat Init.Wf Wellfounded.Inverse_Image.
+From Stdlib Require Import List Arith Bool Arith.Wf_nat Init.Wf Wellfounded.Inverse_Image Lia.
 Import ListNotations.
 Require Import LTS.
 Require Import EchoAlgorithm.
@@ -4639,14 +4639,2050 @@ Proof.
   intros gs Hr. exact (proj1 (proj2 (Hcomb gs Hr))).
 Qed.
 
-(** When the initiator decides, no Token in the bag targets an Idle node.
-    Proof strategy: .claude/no_token_idle_decided_proof.md.
-    Supporting invariants above (decided_pending_zero, token_at_most_once,
-    token_from_parent_consumed) build toward this; pending-chain argument remains. *)
-Variable no_token_idle_decided :
+(* ================================================================== *)
+(** *** pending_pos_active: PENS + PNC combined invariant *)
+
+Definition pending_pos_active (gs : EState) : Prop :=
+  forall m par,
+    (proc_of gs m).(ps_phase) = Active ->
+    (proc_of gs m).(ps_parent) = Some par ->
+    (proc_of gs m).(ps_pending) >= 1 ->
+    ~ In (mkPkt m par Echo) (es_msgs gs) /\
+    ~ In m (proc_of gs par).(ps_children).
+
+Lemma ppa_init : forall gs, lts_init ELts gs -> pending_pos_active gs.
+Proof.
+  intros gs [Hproc _] m par Hph _ _.
+  unfold proc_of in Hph. rewrite Hproc in Hph. simpl in Hph. discriminate.
+Qed.
+
+Lemma ppa_step gs lbl gs' :
+    pending_pos_active gs -> token_from_parent_consumed gs ->
+    idle_not_in_children gs -> echo_src_not_idle gs ->
+    valid_packets gs -> parent_is_neighbor gs ->
+    lts_trans ELts gs lbl gs' -> pending_pos_active gs'.
+Proof.
+  intros Hppa Htfpc Hinic Hesni Hvp Hpin Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+  - set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
+    assert (Hother : forall n, n <> initiator -> proc_of gs' n = proc_of gs0 n).
+    { intros n Hne. unfold gs', proc_of, initiator_start. simpl.
+      rewrite upd_other; [reflexivity | intro H; exact (Hne (eq_sym H))]. }
+    assert (Hinit_par : (proc_of gs' initiator).(ps_parent) = None).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    intros m par Hph Hpar Hpend.
+    destruct (node_eq m initiator) as [-> | Hne]; [rewrite Hinit_par in Hpar; discriminate|].
+    rewrite (Hother m Hne) in Hph, Hpar, Hpend.
+    destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]. split.
+    + unfold gs', initiator_start. simpl. intro H. apply in_app_iff in H as [Ho|Hn].
+      * exact (Hecho Ho).
+      * apply send_to_all_inv in Hn as [_ [_ Hb]]. simpl in Hb. discriminate.
+    + destruct (node_eq par initiator) as [-> | Hnep].
+      * unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. intro H; exact H.
+      * rewrite (Hother par Hnep). exact Hchild.
+  - subst gs0'.
+    set (self := ep_dst pkt). set (sender := ep_src pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    intros m par Hph Hpar Hpend.
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+    + (* Token/Idle *)
+      set (fwds := filter (fun x => if node_eq x sender then false else true) (nbrs all_nodes adj self)).
+      assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+      { intros q Hne. unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. fold sender.
+        set (len0 := length (filter (fun x => if node_eq x sender then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0);
+        simpl es_procs; apply upd_other; intro H; exact (Hne (eq_sym H)). }
+      assert (Hself_par : (proc_of gs' self).(ps_parent) = Some sender).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        fold sender.
+        set (len0 := length (filter (fun x => if node_eq x sender then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hself_ch : (proc_of gs' self).(ps_children) = []).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        fold sender.
+        set (len0 := length (filter (fun x => if node_eq x sender then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hself_idle : (proc_of gs0 self).(ps_phase) = Idle)
+        by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+      assert (Hself_pend : (proc_of gs' self).(ps_pending) = length fwds).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        fold sender.
+        destruct (Nat.eqb (length (filter (fun x => if node_eq x sender then false else true)
+                                          (nbrs all_nodes adj self))) 0) eqn:Hq;
+        simpl es_procs; rewrite upd_self; simpl;
+        [apply Nat.eqb_eq in Hq; exact (eq_sym Hq) | reflexivity]. }
+      destruct (node_eq m self) as [-> | Hne].
+      * rewrite Hself_par in Hpar; injection Hpar as <-. rewrite Hself_pend in Hpend.
+        destruct (Nat.eqb (length fwds) 0) eqn:Hleaf.
+        -- apply Nat.eqb_eq in Hleaf; rewrite Hleaf in Hpend; inversion Hpend.
+        -- apply Nat.eqb_neq in Hleaf.
+           assert (Hmsgs : es_msgs gs' = es_msgs gs_mid ++ send_to_all self fwds Token).
+           { unfold gs', handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase.
+             fold sender. fold fwds. rewrite (proj2 (Nat.eqb_neq _ 0) Hleaf); reflexivity. }
+           split.
+           ++ rewrite Hmsgs; intro H; apply in_app_iff in H as [Ho|Hn].
+              ** apply remove_pkt_in in Ho; exact (Hesni (mkPkt self sender Echo) Ho eq_refl Hself_idle).
+              ** apply send_to_all_inv in Hn as [_ [_ Hb]]; simpl in Hb; discriminate.
+           ++ destruct (node_eq sender self) as [Heq|Hne].
+              ** exfalso.
+                 assert (Hadj_ss : adj sender self = true).
+                 { change sender with (ep_src pkt). change self with (ep_dst pkt). exact (Hvp pkt Hin). }
+                 rewrite Heq in Hadj_ss. rewrite adj_irrefl in Hadj_ss. discriminate.
+              ** rewrite (Hother sender Hne); exact (Hinic sender self Hself_idle).
+      * rewrite (Hother m Hne) in Hph, Hpar, Hpend.
+        destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild].
+        assert (Hmi : forall q, In q (es_msgs gs') ->
+            In q (es_msgs gs_mid) \/ q = mkPkt self sender Echo \/
+            (ep_src q = self /\ ep_body q = Token)).
+        { intro q. unfold gs', handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase.
+          fold sender.
+          destruct (Nat.eqb (length (filter (fun x => if node_eq x sender then false else true)
+                                            (nbrs all_nodes adj self))) 0) eqn:Hq.
+          - simpl; intro H; apply in_app_iff in H as [H|H]; [left; exact H|].
+            destruct H as [<-|[]]; right; left; reflexivity.
+          - simpl; intro H; apply in_app_iff in H as [H|H]; [left; exact H|].
+            apply send_to_all_inv in H as [Hs [_ Hb]]; right; right; simpl in *; exact (conj Hs Hb). }
+        split.
+        -- intro H; apply Hmi in H as [Ho|[Heq|[Hs _]]].
+           ++ exact (Hecho (remove_pkt_in _ _ _ Ho)).
+           ++ injection Heq as Hms _; exact (Hne Hms).
+           ++ simpl in Hs; exact (Hne Hs).
+        -- destruct (node_eq par self) as [-> | Hnep].
+           ++ rewrite Hself_ch; intro H; exact H.
+           ++ rewrite (Hother par Hnep); exact Hchild.
+    + (* Token/Active *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      assert (Hmg : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
+      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      * rewrite Hmg; intro H; apply in_app_iff in H as [Ho|Hn].
+        -- exact (Hecho (remove_pkt_in _ _ _ Ho)).
+        -- destruct Hn as [Heq|[]]; injection Heq as Hms Hds; subst m par.
+           assert (He : pkt = mkPkt sender self Token).
+           { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+           rewrite He in Hin; exact (Htfpc self sender Hpar Hin).
+      * unfold proc_of; rewrite Hpr; exact Hchild.
+    + (* Token/Decided *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
+      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
+        rewrite Hbody, Hphase in H; simpl in H; exact (Hecho (remove_pkt_in _ _ _ H)).
+      * unfold proc_of; rewrite Hpr; exact Hchild.
+    + (* Echo/Idle *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
+      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
+        rewrite Hbody, Hphase in H; simpl in H; exact (Hecho (remove_pkt_in _ _ _ H)).
+      * unfold proc_of; rewrite Hpr; exact Hchild.
+    + (* Echo/Active *)
+      destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par0|] eqn:Hpar0.
+        -- set (np := mkProc Active (Some par0) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np)
+                                            (es_msgs gs_mid ++ [mkPkt self par0 Echo])).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold np; rewrite Hpeq; reflexivity. }
+           assert (Hz : Nat.pred (ps_pending p) = 0) by
+             (apply Nat.eqb_eq in Hone; rewrite Hone; simpl; reflexivity).
+           destruct (node_eq m self) as [-> | Hne].
+           ++ rewrite Hge, proc_of_upd in Hpend.
+              destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+              simpl in Hpend; rewrite Hz in Hpend; inversion Hpend.
+           ++ rewrite Hge, proc_of_upd in Hph, Hpar, Hpend.
+              destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+              unfold proc_of in Hph, Hpar, Hpend.
+              destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+              ** rewrite Hge; simpl es_msgs; intro H; apply in_app_iff in H as [Ho|Hn].
+                 --- exact (Hecho (remove_pkt_in _ _ _ Ho)).
+                 --- destruct Hn as [Heq|[]]; injection Heq as Hms _; exact (Hne (eq_sym Hms)).
+              ** rewrite Hge, proc_of_upd.
+                 destruct (node_eq self par) as [Heq|Hnep].
+                 --- simpl; unfold np; simpl; intro H; destruct H as [<-|Hr].
+                     +++ assert (Hp : (proc_of gs0 sender).(ps_parent) = Some self) by (rewrite Heq; exact Hpar).
+                         assert (He : pkt = mkPkt sender self Echo).
+                         { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+                         rewrite He in Hin; exact (proj1 (Hppa sender self Hph Hp Hpend) Hin).
+                     +++ rewrite <- Heq in Hchild; exact (Hchild Hr).
+                 --- unfold proc_of; exact Hchild.
+        -- set (dec := mkProc Decided None 0 (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self dec) (es_msgs gs_mid)).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold dec; rewrite Hpeq; reflexivity. }
+           destruct (node_eq m self) as [-> | Hne].
+           ++ rewrite Hge, proc_of_upd in Hph.
+              destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+              simpl in Hph; discriminate.
+           ++ rewrite Hge, proc_of_upd in Hph, Hpar, Hpend.
+              destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+              unfold proc_of in Hph, Hpar, Hpend.
+              destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+              ** rewrite Hge; simpl es_msgs; intro H; exact (Hecho (remove_pkt_in _ _ _ H)).
+              ** rewrite Hge, proc_of_upd.
+                 destruct (node_eq self par) as [Heq|Hnep].
+                 --- simpl; unfold dec; simpl; intro H; destruct H as [<-|Hr].
+                     +++ assert (Hp : (proc_of gs0 sender).(ps_parent) = Some self) by (rewrite Heq; exact Hpar).
+                         assert (He : pkt = mkPkt sender self Echo).
+                         { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+                         rewrite He in Hin; exact (proj1 (Hppa sender self Hph Hp Hpend) Hin).
+                     +++ rewrite <- Heq in Hchild; exact (Hchild Hr).
+                 --- unfold proc_of; exact Hchild.
+      * set (np := mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+        assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np) (es_msgs gs_mid)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+          rewrite Hbody, Hphase, Hone; unfold np; rewrite Hpeq; reflexivity. }
+        destruct (node_eq m self) as [-> | Hne].
+        -- rewrite Hge, proc_of_upd in Hph, Hpar, Hpend.
+           destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+           simpl in Hph, Hpar, Hpend; unfold np in Hpar, Hpend; simpl in Hpar, Hpend.
+           assert (Hold2 : ps_pending p >= 2).
+           { apply Nat.eqb_neq in Hone.
+             destruct (ps_pending p) as [|[|k]].
+             - simpl in Hpend. inversion Hpend.
+             - exfalso. apply Hone. reflexivity.
+             - simpl. lia. }
+           assert (Hpho : (proc_of gs0 self).(ps_phase) = Active)
+             by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+           assert (Hparo : (proc_of gs0 self).(ps_parent) = Some par)
+             by (unfold proc_of; rewrite <- Hpeq; exact Hpar).
+           assert (Hpo1 : (proc_of gs0 self).(ps_pending) >= 1) by
+             (unfold proc_of; rewrite <- Hpeq;
+              exact (Nat.le_trans 1 2 _ (Nat.le_succ_diag_r 1) Hold2)).
+           destruct (Hppa self par Hpho Hparo Hpo1) as [Heo Hco]; split.
+           ++ rewrite Hge; simpl es_msgs; intro H; exact (Heo (remove_pkt_in _ _ _ H)).
+           ++ rewrite Hge, proc_of_upd.
+              destruct (node_eq self par) as [Heq|Hnep].
+              ** exfalso.
+                 assert (Hps : (proc_of gs0 self).(ps_parent) = Some self)
+                   by (rewrite <- Heq in Hparo; exact Hparo).
+                 assert (Hadj_ss := Hpin self self Hps). rewrite adj_irrefl in Hadj_ss. discriminate.
+              ** destruct (node_eq self par) as [Habs|_]; [exact (False_ind _ (Hnep Habs))|]; exact Hco.
+        -- rewrite Hge, proc_of_upd in Hph, Hpar, Hpend.
+           destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+           unfold proc_of in Hph, Hpar, Hpend.
+           destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+           ++ rewrite Hge; simpl es_msgs; intro H; exact (Hecho (remove_pkt_in _ _ _ H)).
+           ++ rewrite Hge, proc_of_upd.
+              destruct (node_eq self par) as [Heq|Hnep].
+              ** simpl; unfold np; simpl; intro H; destruct H as [<-|Hr].
+                 --- assert (Hp : (proc_of gs0 sender).(ps_parent) = Some self) by (rewrite Heq; exact Hpar).
+                     assert (He : pkt = mkPkt sender self Echo).
+                     { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+                     rewrite He in Hin; exact (proj1 (Hppa sender self Hph Hp Hpend) Hin).
+                 --- rewrite <- Heq in Hchild; exact (Hchild Hr).
+              ** unfold proc_of; exact Hchild.
+    + (* Echo/Decided *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hph, Hpar, Hpend; rewrite Hpr in Hph, Hpar, Hpend.
+      destruct (Hppa m par Hph Hpar Hpend) as [Hecho Hchild]; split.
+      * intro H; unfold gs' in H; unfold handle_msg in H; change (es_procs gs_mid self) with p in H;
+        rewrite Hbody, Hphase in H; simpl in H; exact (Hecho (remove_pkt_in _ _ _ H)).
+      * unfold proc_of; rewrite Hpr; exact Hchild.
+Qed.
+
+Theorem pending_pos_active_holds : is_invariant ELts pending_pos_active.
+Proof.
+  assert (Hcomb : is_invariant ELts
+    (fun gs => pending_pos_active gs /\ token_at_most_once gs /\
+               token_from_parent_consumed gs /\ parent_is_active gs /\
+               idle_not_in_children gs /\ echo_src_not_idle gs /\
+               token_src_not_idle gs /\ INV gs)).
+  { apply invariant_by_induction.
+    - intros gs Hi.
+      exact (conj (ppa_init gs Hi) (conj (tamo_init gs Hi) (conj (tfpc_init gs Hi)
+             (conj (pia_init gs Hi) (conj (inic_init gs Hi) (conj (esni_init gs Hi)
+             (conj (tsni_init gs Hi) (INV_init gs Hi)))))))).
+    - intros gs lbl gs' [Hppa [Htamo [Htfpc [Hpia [Hinic [Hesni [Htsni Hinv]]]]]]] Hstep.
+      refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _))))))).
+      + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+                        (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
+      + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
+      + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
+      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
+      + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
+      + exact (esni_step gs lbl gs' Hesni Hstep).
+      + exact (tsni_step gs lbl gs' Htsni Hstep).
+      + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hin Heq].
+        * exact (INV_step_start gs0 Hinv Hph).
+        * exact (INV_step_deliver gs0 pkt gs0' Hinv Hin Heq). }
+  intros gs Hr; exact (proj1 (Hcomb gs Hr)).
+Qed.
+
+(* ================================================================== *)
+(** *** Helper invariants for weak_pending_ge_count *)
+
+(** echo_dst_not_idle: Echo(src→dst) ∈ bag → phase(dst) ≠ Idle *)
+Definition echo_dst_not_idle (gs : EState) : Prop :=
+  forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
+    (proc_of gs (ep_dst pkt)).(ps_phase) <> Idle.
+
+(** echo_token_sender_not: Echo(A→B) ∈ bag → Token(B→A) ∉ bag *)
+Definition echo_token_sender_not (gs : EState) : Prop :=
+  forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
+    ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs).
+
+(** children_implies_no_parent_token: c ∈ children(m) → Token(m→c) ∉ bag *)
+Definition children_implies_no_parent_token (gs : EState) : Prop :=
+  forall m c, In c (proc_of gs m).(ps_children) ->
+    ~ In (mkPkt m c Token) (es_msgs gs).
+
+(** echo_not_in_children: Echo(src→dst) ∈ bag → src ∉ children(dst) *)
+Definition echo_not_in_children (gs : EState) : Prop :=
+  forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
+    ~ In (ep_src pkt) (proc_of gs (ep_dst pkt)).(ps_children).
+
+(** echo_src_in_fwds: Echo(src→dst) ∈ bag → parent(dst) ≠ Some src *)
+Definition echo_src_in_fwds (gs : EState) : Prop :=
+  forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Echo ->
+    (proc_of gs (ep_dst pkt)).(ps_parent) <> Some (ep_src pkt).
+
+(** pending_exact_count_ge: pending(m) + |children(m)| ≥ |act_fwds(m)|
+    for Active/Decided m. *)
+Definition pending_exact_count_ge (gs : EState) : Prop :=
+  forall m,
+    ((proc_of gs m).(ps_phase) = Active \/ (proc_of gs m).(ps_phase) = Decided) ->
+    (proc_of gs m).(ps_pending) + length (proc_of gs m).(ps_children) >=
+    length (act_fwds gs m).
+
+(** echo_at_most_once: each Echo(src→dst) appears at most once in the bag. *)
+Definition echo_at_most_once (gs : EState) : Prop :=
+  forall pkt, ep_body pkt = Echo -> count_pkt pkt (es_msgs gs) <= 1.
+
+Lemma eamo_remove_not_in (gs : EState) (pkt : @echo_packet node) :
+    echo_at_most_once gs ->
+    ep_body pkt = Echo ->
+    In pkt (es_msgs gs) ->
+    ~ In pkt (remove_pkt node_eq pkt (es_msgs gs)).
+Proof.
+  intros Heamo Hbody Hin Hin'.
+  assert (H1 : count_pkt pkt (es_msgs gs) <= 1) by exact (Heamo pkt Hbody).
+  assert (H2 : count_pkt pkt (es_msgs gs) >= 1) by exact (count_pkt_ge_one_in pkt _ Hin).
+  assert (Heq1 : count_pkt pkt (es_msgs gs) = 1)
+    by (apply Nat.le_antisymm; [exact H1 | exact H2]).
+  assert (H3 : count_pkt pkt (remove_pkt node_eq pkt (es_msgs gs)) >= 1)
+    by exact (count_pkt_ge_one_in pkt _ Hin').
+  assert (H4 : count_pkt pkt (remove_pkt node_eq pkt (es_msgs gs)) + 1 <=
+               count_pkt pkt (es_msgs gs))
+    by exact (count_pkt_remove_pkt_self pkt (es_msgs gs) Hin).
+  rewrite Heq1 in H4. rewrite Nat.add_comm in H4. simpl in H4.
+  set (count := count_pkt pkt (remove_pkt node_eq pkt (es_msgs gs))).
+  assert (HScount_le_count : S count <= count).
+  { apply Nat.le_trans with (m := 1); [exact H4 | exact H3]. }
+  exact (Nat.lt_irrefl count (Nat.lt_le_trans count (S count) count
+           (Nat.lt_succ_diag_r count) HScount_le_count)).
+Qed.
+
+Lemma eamo_init : forall gs, lts_init ELts gs -> echo_at_most_once gs.
+Proof.
+  intros gs [_ Hmsgs] p _. unfold count_pkt. rewrite Hmsgs. simpl. exact (Nat.le_0_l _).
+Qed.
+
+Lemma eamo_step gs lbl gs' :
+    echo_at_most_once gs ->
+    echo_src_not_idle gs ->
+    echo_token_sender_not gs ->
+    pending_pos_active gs ->
+    lts_trans ELts gs lbl gs' ->
+    echo_at_most_once gs'.
+Proof.
+  intros Heamo Hesni Hetsn Hppa Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+  - (* step_start: new pkts are Tokens. No new Echoes. *)
+    set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
+    assert (Hmsgs : es_msgs gs' = es_msgs gs0 ++
+                    send_to_all initiator (nbrs all_nodes adj initiator) Token).
+    { unfold gs', initiator_start. simpl. reflexivity. }
+    intros pkt2 Hbody2. rewrite Hmsgs. rewrite count_pkt_app.
+    assert (Hzero : count_pkt pkt2 (send_to_all initiator (nbrs all_nodes adj initiator) Token) = 0).
+    { apply count_pkt_zero_if_no_match. intros q Hq.
+      apply send_to_all_inv in Hq as [_ [_ Hb]].
+      (* ep_body q = Token, ep_body pkt2 = Echo → pkt_matches = false *)
+      unfold pkt_matches.
+      destruct (node_eq (ep_src pkt2) (ep_src q)) as [_ | _]; [| reflexivity].
+      destruct (node_eq (ep_dst pkt2) (ep_dst q)) as [_ | _]; [| reflexivity].
+      rewrite Hbody2, Hb. reflexivity. }
+    rewrite Hzero. rewrite Nat.add_0_r. exact (Heamo pkt2 Hbody2).
+  - subst gs0'.
+    set (self := ep_dst pkt). set (sender := ep_src pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    intros pkt2 Hbody2.
+    (* Helper: count in gs0 ≤ 1 *)
+    assert (Hle1 : count_pkt pkt2 (es_msgs gs0) <= 1) by exact (Heamo pkt2 Hbody2).
+    (* Helper: count in gs_mid ≤ 1 *)
+    assert (Hle_mid : count_pkt pkt2 (es_msgs gs_mid) <= 1).
+    { apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+      exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). exact Hle1. }
+    (* Helper: new Echo count in [single_echo] ≤ 1 *)
+    assert (Hle_single : forall a b, count_pkt pkt2 [mkPkt a b Echo] <= 1).
+    { intros a b. unfold count_pkt. simpl.
+      destruct (pkt_matches pkt2 (mkPkt a b Echo)) eqn:Hm; simpl.
+      - exact (Nat.le_refl _).
+      - exact (Nat.le_0_l _). }
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+    + (* Token/Idle: new msg is Echo(self→sender) OR send_to_all (Tokens). *)
+      assert (Hself_idle : (proc_of gs0 self).(ps_phase) = Idle)
+        by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+      set (fwds := filter (fun x => if node_eq x sender then false else true) (nbrs all_nodes adj self)).
+      (* Case split: leaf (Echo added) or internal (Tokens added) *)
+      destruct (Nat.eqb (length fwds) 0) eqn:Hleaf.
+      * (* Leaf: gs'.msgs = gs_mid ++ [Echo(self→sender)] *)
+        assert (Hmsgs : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
+        { unfold gs', handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase.
+          fold sender; fold fwds. rewrite Hleaf. simpl. reflexivity. }
+        rewrite Hmsgs. rewrite count_pkt_app.
+        (* New Echo(self→sender): old count = 0 (self was Idle, esni) *)
+        assert (H0 : count_pkt pkt2 (es_msgs gs0) = 0 \/ count_pkt pkt2 [mkPkt self sender Echo] = 0).
+        { (* If pkt2.src ≠ self: count in [Echo(self→sender)] = 0 (src mismatch). *)
+          destruct (node_eq (ep_src pkt2) self) as [Hs|Hns].
+          2: { right. apply count_pkt_zero_if_no_match. intros q [<-|[]].
+               unfold pkt_matches. simpl.
+               destruct (node_eq (ep_src pkt2) self) as [Habs|_]; [exact (False_ind _ (Hns Habs))|].
+               reflexivity. }
+          left. apply count_pkt_zero_if_no_match. intros q Hq.
+          unfold pkt_matches. destruct (node_eq (ep_src pkt2) (ep_src q)) as [Hsrc|_]; [| reflexivity].
+          (* pkt2.src = ep_src q. And pkt2.src = self. So ep_src q = self. q ∈ gs0.msgs.
+             q body = pkt2 body = Echo. By esni: phase(self in gs0) ≠ Idle. But self IS Idle. *)
+          destruct (node_eq (ep_dst pkt2) (ep_dst q)) as [_|_]; [| reflexivity].
+          rewrite Hbody2. destruct (ep_body q) eqn:Hbq.
+          - (* q body = Token: pkt_matches = false. ✓ *)
+            reflexivity.
+          - (* q body = Echo: by esni: phase(ep_src q = self) ≠ Idle. But Idle. *)
+            exfalso.
+            assert (Hself_q : (proc_of gs0 (ep_src q)).(ps_phase) = Idle).
+            { rewrite <- Hsrc. rewrite Hs. exact Hself_idle. }
+            exact (Hesni q Hq Hbq Hself_q). }
+        destruct H0 as [H0|H0].
+        -- (* count in gs0 = 0: count in gs_mid = 0, total = 0 + count[echo] ≤ 1 *)
+           assert (Hle_mid0 : count_pkt pkt2 (es_msgs gs_mid) = 0).
+           { apply Nat.le_antisymm; [| exact (Nat.le_0_l _)].
+             apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+             exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). rewrite H0. exact (Nat.le_refl _). }
+           rewrite Hle_mid0. simpl. exact (Hle_single self sender).
+        -- (* count in [echo] = 0: total = count_mid + 0 ≤ 1 *)
+           rewrite H0. rewrite Nat.add_0_r. exact Hle_mid.
+      * (* Internal: gs'.msgs = gs_mid ++ send_to_all self fwds Token *)
+        assert (Hmsgs : es_msgs gs' = es_msgs gs_mid ++ send_to_all self fwds Token).
+        { unfold gs', handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase.
+          fold sender; fold fwds. rewrite Hleaf. simpl. reflexivity. }
+        rewrite Hmsgs. rewrite count_pkt_app.
+        assert (Hzero_tokens : count_pkt pkt2 (send_to_all self fwds Token) = 0).
+        { apply count_pkt_zero_if_no_match. intros q Hq.
+          apply send_to_all_inv in Hq as [_ [_ Hbq]].
+          unfold pkt_matches.
+          destruct (node_eq (ep_src pkt2) (ep_src q)) as [_|_]; [| reflexivity].
+          destruct (node_eq (ep_dst pkt2) (ep_dst q)) as [_|_]; [| reflexivity].
+          rewrite Hbody2, Hbq. reflexivity. }
+        rewrite Hzero_tokens. rewrite Nat.add_0_r. exact Hle_mid.
+    + (* Token/Active: gs'.msgs = gs_mid ++ [Echo(self→sender)] *)
+      assert (Hmg : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      rewrite Hmg. rewrite count_pkt_app.
+      (* New Echo(self→sender): old count = 0 (etsn: Token(sender→self) ∈ bag → Echo(self→sender) ∉ bag) *)
+      assert (H0 : count_pkt pkt2 (es_msgs gs0) = 0 \/ count_pkt pkt2 [mkPkt self sender Echo] = 0).
+      { destruct (node_eq (ep_src pkt2) self) as [Hs|Hns].
+        2: { right. apply count_pkt_zero_if_no_match. intros q [<-|[]].
+             unfold pkt_matches. simpl.
+             destruct (node_eq (ep_src pkt2) self) as [Habs|_]; [exact (False_ind _ (Hns Habs))|]. reflexivity. }
+        destruct (node_eq (ep_dst pkt2) sender) as [Hd|Hnd].
+        2: { right. apply count_pkt_zero_if_no_match. intros q [<-|[]].
+             unfold pkt_matches. simpl.
+             destruct (node_eq (ep_src pkt2) self) as [_|Habs]; [| exact (False_ind _ (Habs Hs))].
+             destruct (node_eq (ep_dst pkt2) sender) as [Habs|_]; [exact (False_ind _ (Hnd Habs))| reflexivity]. }
+        (* pkt2 = Echo(self→sender). Old count = 0 from etsn. *)
+        left. apply count_pkt_zero_if_no_match. intros q Hq.
+        unfold pkt_matches.
+        destruct (node_eq (ep_src pkt2) (ep_src q)) as [Hsrc|_]; [| reflexivity].
+        destruct (node_eq (ep_dst pkt2) (ep_dst q)) as [Hdst|_]; [| reflexivity].
+        rewrite Hbody2. destruct (ep_body q) eqn:Hbq; [reflexivity |].
+        (* q = Echo(self→sender) in gs0.msgs. pkt_matches=true. But we need false. *)
+        (* By etsn: Echo(q=self→sender) ∈ gs0 → Token(sender→self) ∉ gs0. But pkt=Token(sender→self) ∈ gs0. *)
+        exfalso.
+        assert (Hne := Hetsn q Hq Hbq). simpl in Hne.
+        (* Hne : ~ In (mkPkt (ep_dst q) (ep_src q) Token) (es_msgs gs0) *)
+        (* ep_dst q = sender (from Hdst and Hd: ep_dst pkt2 = sender and ep_dst pkt2 = ep_dst q) *)
+        (* ep_src q = self (from Hsrc and Hs: ep_src pkt2 = self and ep_src pkt2 = ep_src q) *)
+        rewrite <- Hsrc, <- Hdst in Hne. rewrite Hs, Hd in Hne.
+        (* Need: In (mkPkt sender self Token) (es_msgs gs0). pkt = Token(sender→self) = Hbody.
+           Hin: In pkt gs0.msgs. pkt = mkPkt sender self Token by Hbody. *)
+        assert (Hpkt' : pkt = mkPkt sender self Token).
+        { destruct pkt as [a b c]. simpl in Hbody, sender, self |- *. rewrite Hbody. reflexivity. }
+        rewrite Hpkt' in Hin. exact (Hne Hin). }
+      destruct H0 as [H0|H0].
+      * (* count in gs0 = 0 *)
+        assert (Hle_mid0 : count_pkt pkt2 (es_msgs gs_mid) = 0).
+        { apply Nat.le_antisymm; [| exact (Nat.le_0_l _)].
+          apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+          exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). rewrite H0. exact (Nat.le_refl _). }
+        rewrite Hle_mid0. simpl. exact (Hle_single self sender).
+      * rewrite H0. rewrite Nat.add_0_r. exact Hle_mid.
+    + (* Token/Decided, Echo/Idle: msgs = remove_pkt *)
+      apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+      { assert (Hms : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+        rewrite Hms. exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). }
+      exact Hle1.
+    + apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+      { assert (Hms : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+        rewrite Hms. exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). }
+      exact Hle1.
+    + (* Echo/Active *)
+      destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par0|] eqn:Hpar0.
+        -- (* pending=1, parent=par0: adds Echo(self→par0) *)
+           assert (Hge : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self par0 Echo]).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; rewrite Hpeq; simpl. reflexivity. }
+           rewrite Hge. rewrite count_pkt_app.
+           assert (H0 : count_pkt pkt2 (es_msgs gs0) = 0 \/ count_pkt pkt2 [mkPkt self par0 Echo] = 0).
+           { destruct (node_eq (ep_src pkt2) self) as [Hs|Hns].
+             2: { right. apply count_pkt_zero_if_no_match. intros q [<-|[]]. unfold pkt_matches. simpl.
+                  destruct (node_eq (ep_src pkt2) self) as [Habs|_]; [exact (False_ind _ (Hns Habs))|]. reflexivity. }
+             destruct (node_eq (ep_dst pkt2) par0) as [Hd|Hnd].
+             2: { right. apply count_pkt_zero_if_no_match. intros q [<-|[]]. unfold pkt_matches. simpl.
+                  destruct (node_eq (ep_src pkt2) self) as [_|Habs]; [| exact (False_ind _ (Habs Hs))].
+                  destruct (node_eq (ep_dst pkt2) par0) as [Habs|_]; [exact (False_ind _ (Hnd Habs))| reflexivity]. }
+             (* pkt2 = Echo(self→par0). Old count = 0 from ppa. *)
+             left. apply count_pkt_zero_if_no_match. intros q Hq.
+             unfold pkt_matches.
+             destruct (node_eq (ep_src pkt2) (ep_src q)) as [Hsrc|_]; [| reflexivity].
+             destruct (node_eq (ep_dst pkt2) (ep_dst q)) as [Hdst|_]; [| reflexivity].
+             rewrite Hbody2. destruct (ep_body q) eqn:Hbq; [reflexivity |].
+             (* q = Echo(self→par0) in gs0.msgs. pkt_matches=true. Need false. By ppa: Echo ∉ gs0. *)
+             exfalso.
+             assert (Hself_ph : (proc_of gs0 self).(ps_phase) = Active)
+               by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+             assert (Hself_par : (proc_of gs0 self).(ps_parent) = Some par0)
+               by (unfold proc_of; rewrite <- Hpeq; exact Hpar0).
+             assert (Hpend1 : (proc_of gs0 self).(ps_pending) >= 1).
+             { unfold proc_of. rewrite <- Hpeq. apply Nat.eqb_eq in Hone. rewrite Hone. simpl. exact (Nat.le_refl _). }
+             assert (Hq_eq : q = mkPkt self par0 Echo).
+             { destruct q as [qs qd qb]. simpl in Hsrc, Hdst, Hbq |- *.
+               rewrite <- Hsrc, <- Hdst, Hbq. rewrite Hs, Hd. reflexivity. }
+             rewrite Hq_eq in Hq. exact (proj1 (Hppa self par0 Hself_ph Hself_par Hpend1) Hq). }
+           destruct H0 as [H0|H0].
+           ++ assert (Hle_mid0 : count_pkt pkt2 (es_msgs gs_mid) = 0).
+              { apply Nat.le_antisymm; [| exact (Nat.le_0_l _)].
+                apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+                exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). rewrite H0. exact (Nat.le_refl _). }
+              rewrite Hle_mid0. simpl. exact (Hle_single self par0).
+           ++ rewrite H0. rewrite Nat.add_0_r. exact Hle_mid.
+        -- (* pending=1, parent=None: no new Echo *)
+           apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+           { assert (Hms : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
+             { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+               rewrite Hbody, Hphase, Hone, Hpar0; rewrite Hpeq; simpl. reflexivity. }
+             rewrite Hms. exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). }
+           exact Hle1.
+      * (* pending ≠ 1: no new Echo *)
+        apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+        { assert (Hms : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
+          { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+            rewrite Hbody, Hphase, Hone; rewrite Hpeq. simpl. reflexivity. }
+          rewrite Hms. exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). }
+        exact Hle1.
+    + (* Echo/Decided: msgs = remove_pkt *)
+      apply Nat.le_trans with (m := count_pkt pkt2 (es_msgs gs0)).
+      { assert (Hms : es_msgs gs' = remove_pkt node_eq pkt gs0.(es_msgs)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+        rewrite Hms. exact (count_pkt_remove_le pkt2 pkt (es_msgs gs0)). }
+      exact Hle1.
+Qed.
+
+(** Helper: act_fwds gs' self = filter (fun n => if n=sender then false else adj self n) all_nodes
+    when parent(self in gs') = Some sender. *)
+Lemma act_fwds_some_eq gs m sender :
+    (proc_of gs m).(ps_parent) = Some sender ->
+    act_fwds gs m =
+    filter (fun n => if node_eq n sender then false else adj m n) all_nodes.
+Proof.
+  intro Hpar. unfold act_fwds. rewrite Hpar. reflexivity.
+Qed.
+
+(** Helper: filter with adj and ne equals filter ne applied to nbrs. *)
+Lemma filter_adj_ne_parent_eq (m sender : node) :
+    filter (fun n => if node_eq n sender then false else adj m n) all_nodes =
+    filter (fun n => if node_eq n sender then false else true) (nbrs all_nodes adj m).
+Proof.
+  unfold nbrs.
+  generalize all_nodes as l. intro l.
+  induction l as [| hd tl IH].
+  - simpl. reflexivity.
+  - simpl. destruct (adj m hd) eqn:Hadj; destruct (node_eq hd sender) eqn:Hne; simpl.
+    + rewrite Hne. exact IH.
+    + rewrite Hne. simpl. rewrite IH. reflexivity.
+    + exact IH.
+    + exact IH.
+Qed.
+
+(** Combined step lemma: prove 6 new invariants simultaneously. *)
+Lemma new_inv_combined_step gs lbl gs' :
+    echo_dst_not_idle gs -> echo_token_sender_not gs ->
+    children_implies_no_parent_token gs -> echo_not_in_children gs ->
+    echo_src_in_fwds gs -> pending_exact_count_ge gs ->
+    echo_at_most_once gs ->
+    pending_pos_active gs -> token_at_most_once gs ->
+    token_from_parent_consumed gs -> parent_is_active gs ->
+    idle_not_in_children gs -> token_src_not_idle gs -> echo_src_not_idle gs ->
+    pkt_nodes_in_all_nodes gs -> parent_in_all_nodes gs ->
+    token_dst_not_parent gs -> no_mutual_parent_prop gs ->
+    INV gs ->
+    lts_trans ELts gs lbl gs' ->
+    echo_dst_not_idle gs' /\ echo_token_sender_not gs' /\
+    children_implies_no_parent_token gs' /\ echo_not_in_children gs' /\
+    echo_src_in_fwds gs' /\ pending_exact_count_ge gs'.
+Proof.
+  intros Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
+         Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+
+  (* ------------------------------------------------------------------ step_start *)
+  - set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
+    assert (Hother : forall n, n <> initiator -> proc_of gs' n = proc_of gs0 n).
+    { intros n Hne. unfold gs', proc_of, initiator_start. simpl.
+      rewrite upd_other; [reflexivity | intro H; exact (Hne (eq_sym H))]. }
+    assert (Hinit_act : (proc_of gs' initiator).(ps_phase) = Active).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    assert (Hinit_ch : (proc_of gs' initiator).(ps_children) = []).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    assert (Hinit_par : (proc_of gs' initiator).(ps_parent) = None).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    assert (Hinit_pend : (proc_of gs' initiator).(ps_pending) =
+                         length (nbrs all_nodes adj initiator)).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    assert (Hmsgs : es_msgs gs' = es_msgs gs0 ++
+                    send_to_all initiator (nbrs all_nodes adj initiator) Token).
+    { unfold gs', initiator_start. simpl. reflexivity. }
+    assert (Hinit_idle_gs0 : (proc_of gs0 initiator).(ps_phase) = Idle).
+    { unfold proc_of. simpl. exact Hph0. }
+    refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+    + (* edni *)
+      intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
+      apply in_app_iff in Hpin as [Ho|Hn].
+      * assert (H := Hedni pkt' Ho Hbp).
+        destruct (node_eq (ep_dst pkt') initiator) as [-> | Hne].
+        -- rewrite Hinit_act. discriminate.
+        -- rewrite (Hother _ Hne). exact H.
+      * apply send_to_all_inv in Hn as [_ [_ Hb]]. rewrite Hb in Hbp. discriminate.
+    + (* etsn *)
+      intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
+      apply in_app_iff in Hpin as [Ho|Hn].
+      * assert (H := Hetsn pkt' Ho Hbp).
+        intro Htin. rewrite Hmsgs in Htin. apply in_app_iff in Htin as [Hto|Hnew].
+        -- exact (H Hto).
+        -- apply send_to_all_inv in Hnew as [Hsrc [_ _]]. simpl in Hsrc.
+           assert (Hcontra := Hedni pkt' Ho Hbp).
+           rewrite Hsrc in Hcontra. exact (Hcontra Hinit_idle_gs0).
+      * apply send_to_all_inv in Hn as [_ [_ Hb]]. rewrite Hb in Hbp. discriminate.
+    + (* cipt *)
+      intros m c Hch.
+      destruct (node_eq m initiator) as [-> | Hne].
+      * rewrite Hinit_ch in Hch. contradiction.
+      * rewrite (Hother m Hne) in Hch.
+        assert (H := Hcipt m c Hch).
+        intro Hpin. rewrite Hmsgs in Hpin. apply in_app_iff in Hpin as [Ho|Hn].
+        -- exact (H Ho).
+        -- apply send_to_all_inv in Hn as [Hsrc [_ _]]. simpl in Hsrc. exact (Hne Hsrc).
+    + (* enic *)
+      intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
+      apply in_app_iff in Hpin as [Ho|Hn].
+      * assert (H := Henic pkt' Ho Hbp).
+        destruct (node_eq (ep_dst pkt') initiator) as [-> | Hne].
+        -- rewrite Hinit_ch. intro Hc; exact Hc.
+        -- rewrite (Hother _ Hne). exact H.
+      * apply send_to_all_inv in Hn as [_ [_ Hb]]. rewrite Hb in Hbp. discriminate.
+    + (* esif *)
+      intros pkt' Hpin Hbp. rewrite Hmsgs in Hpin.
+      apply in_app_iff in Hpin as [Ho|Hn].
+      * assert (H := Hesif pkt' Ho Hbp).
+        destruct (node_eq (ep_dst pkt') initiator) as [-> | Hne].
+        -- rewrite Hinit_par. discriminate.
+        -- rewrite (Hother _ Hne). exact H.
+      * apply send_to_all_inv in Hn as [_ [_ Hb]]. rewrite Hb in Hbp. discriminate.
+    + (* pec_ge *)
+      intros m Hph.
+      destruct (node_eq m initiator) as [-> | Hne].
+      * rewrite Hinit_pend, Hinit_ch. simpl length. rewrite Nat.add_0_r.
+        unfold act_fwds. rewrite Hinit_par. apply Nat.le_refl.
+      * rewrite (Hother m Hne) in Hph.
+        assert (H := Hpecge m Hph).
+        assert (Hag : act_fwds gs' m = act_fwds gs0 m).
+        { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
+        rewrite Hag. rewrite (Hother m Hne). exact H.
+  (* ------------------------------------------------------------------ step_deliver *)
+  - subst gs0'.
+    set (self := ep_dst pkt). set (sender := ep_src pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+
+    (* ======================================== Token / Idle *)
+    + set (fwds := filter (fun x => if node_eq x sender then false else true) (nbrs all_nodes adj self)).
+      assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+      { intros q Hne. unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. fold sender.
+        set (len0 := length (filter (fun x => if node_eq x sender then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0);
+        simpl es_procs; apply upd_other; intro H; exact (Hne (eq_sym H)). }
+      assert (Hself_act : (proc_of gs' self).(ps_phase) = Active).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        fold sender.
+        set (len0 := length (filter (fun x => if node_eq x sender then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hself_par : (proc_of gs' self).(ps_parent) = Some sender).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        fold sender.
+        set (len0 := length (filter (fun x => if node_eq x sender then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hself_ch : (proc_of gs' self).(ps_children) = []).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        fold sender.
+        set (len0 := length (filter (fun x => if node_eq x sender then false else true)
+                                    (nbrs all_nodes adj self))).
+        destruct (Nat.eqb len0 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hself_idle : (proc_of gs0 self).(ps_phase) = Idle)
+        by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+      assert (Hself_pend : (proc_of gs' self).(ps_pending) = length fwds).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        fold sender.
+        destruct (Nat.eqb (length (filter (fun x => if node_eq x sender then false else true)
+                                          (nbrs all_nodes adj self))) 0) eqn:Hq;
+        simpl es_procs; rewrite upd_self; simpl;
+        [apply Nat.eqb_eq in Hq; exact (eq_sym Hq) | reflexivity]. }
+      assert (Hmsgs_cla : forall q, In q (es_msgs gs') ->
+          In q (es_msgs gs_mid) \/ q = mkPkt self sender Echo \/
+          (ep_src q = self /\ ep_body q = Token)).
+      { intro q. unfold gs', handle_msg; change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. fold sender.
+        destruct (Nat.eqb (length (filter (fun x => if node_eq x sender then false else true)
+                                          (nbrs all_nodes adj self))) 0) eqn:Hq.
+        - simpl; intro H; apply in_app_iff in H as [H|H]; [left; exact H|].
+          destruct H as [<-|[]]; right; left; reflexivity.
+        - simpl; intro H; apply in_app_iff in H as [H|H]; [left; exact H|].
+          apply send_to_all_inv in H as [Hs [_ Hb]]; right; right; simpl in *; exact (conj Hs Hb). }
+      assert (Hsender_ne_idle : (proc_of gs0 sender).(ps_phase) <> Idle)
+        by exact (Htsni pkt Hin Hbody).
+      assert (Hsender_ne_self : sender <> self).
+      { intro Heq. apply Hsender_ne_idle. rewrite Heq. unfold proc_of. rewrite <- Hpeq. exact Hphase. }
+      refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+      * (* edni: old Echoes + new Echo(self→sender). No old Echo dst=self (self was Idle). *)
+        intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
+        -- apply remove_pkt_in in Ho. assert (H := Hedni pkt' Ho Hbp).
+           destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
+           ++ rewrite Hself_act. discriminate.
+           ++ rewrite (Hother _ Hne). exact H.
+        -- subst pkt'. simpl. rewrite (Hother sender Hsender_ne_self). exact Hsender_ne_idle.
+        -- rewrite Hbt in Hbp. discriminate.
+      * (* etsn: Echo(A→B) ∈ gs'.msgs → Token(B→A) ∉ gs'.msgs *)
+        intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
+        -- apply remove_pkt_in in Ho. assert (H := Hetsn pkt' Ho Hbp).
+           intro Htin. apply Hmsgs_cla in Htin as [Hto|[Heq|[Hs2 Hbt2]]].
+           ++ exact (H (remove_pkt_in _ _ _ Hto)).
+           ++ injection Heq; intros; discriminate.
+           ++ (* Token(B→A) has src=self: B=self. Echo(A→self) in gs0, self Idle → edni contradiction. *)
+              simpl in Hs2. assert (Hcontra := Hedni pkt' Ho Hbp).
+              rewrite Hs2 in Hcontra. exact (Hcontra Hself_idle).
+        -- (* pkt' = Echo(self→sender): Token(sender→self) ∉ gs'.msgs *)
+           subst pkt'. simpl. intro Htin. apply Hmsgs_cla in Htin as [Hto|[Heq|[Hs2 Hbt2]]].
+           ++ (* Hto : In (mkPkt sender self Token) (es_msgs gs_mid) = remove_pkt pkt gs0.msgs. *)
+              assert (Hpkt_eq : pkt = mkPkt sender self Token).
+              { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+              rewrite <- Hpkt_eq in Hto. exact (tamo_remove_not_in gs0 pkt Htamo Hbody Hin Hto).
+           ++ injection Heq; intros; discriminate.
+           ++ exact (Hsender_ne_self Hs2).
+        -- rewrite Hbt in Hbp. discriminate.
+      * (* cipt: self.children=[] → only old children matter. Token from new msgs only from self. *)
+        intros m c Hch.
+        destruct (node_eq m self) as [-> | Hne].
+        -- rewrite Hself_ch in Hch. contradiction.
+        -- rewrite (Hother m Hne) in Hch. assert (H := Hcipt m c Hch).
+           intro Hpin. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
+           ++ exact (H (remove_pkt_in _ _ _ Ho)).
+           ++ injection Heq; intros; discriminate.
+           ++ simpl in Hs. exact (Hne Hs).
+      * (* enic: old Echoes IH (no old Echo dst=self). New Echo(self→sender): self∉children(sender). *)
+        intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
+        -- apply remove_pkt_in in Ho. assert (H := Henic pkt' Ho Hbp).
+           destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
+           ++ rewrite Hself_ch. intro Hc; exact Hc.
+           ++ rewrite (Hother _ Hne). exact H.
+        -- subst pkt'. simpl. rewrite (Hother sender Hsender_ne_self).
+           intro Hch.
+           assert (Hpkt_eq : pkt = mkPkt sender self Token).
+           { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+           rewrite Hpkt_eq in Hin. exact (Hcipt sender self Hch Hin).
+        -- rewrite Hbt in Hbp. discriminate.
+      * (* esif: old Echoes (no old Echo dst=self). New Echo(self→sender): parent(sender)≠Some self from tdnp. *)
+        intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|[Heq|[Hs Hbt]]].
+        -- apply remove_pkt_in in Ho. assert (H := Hesif pkt' Ho Hbp).
+           destruct (node_eq (ep_dst pkt') self) as [Heq | Hne].
+           ++ (* ep_dst pkt' = self: self was Idle, contradiction with edni *)
+              assert (Hcontra := Hedni pkt' Ho Hbp). rewrite Heq in Hcontra.
+              exact (False_ind _ (Hcontra Hself_idle)).
+           ++ rewrite (Hother _ Hne). exact H.
+        -- subst pkt'. simpl. rewrite (Hother sender Hsender_ne_self).
+           change sender with (ep_src pkt). change self with (ep_dst pkt).
+           exact (Htdnp pkt Hin Hbody).
+        -- rewrite Hbt in Hbp. discriminate.
+      * (* pec_ge: self Active, pending=|fwds|, children=[], act_fwds=fwds. Others IH. *)
+        intros m Hph.
+        destruct (node_eq m self) as [-> | Hne].
+        -- rewrite Hself_pend, Hself_ch. simpl length. rewrite Nat.add_0_r.
+           assert (Haf : act_fwds gs' self = fwds).
+           { rewrite (act_fwds_some_eq gs' self sender Hself_par).
+             exact (filter_adj_ne_parent_eq self sender). }
+           rewrite Haf. apply Nat.le_refl.
+        -- rewrite (Hother m Hne) in Hph.
+           assert (H := Hpecge m Hph).
+           assert (Hag : act_fwds gs' m = act_fwds gs0 m).
+           { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
+           rewrite Hag. rewrite (Hother m Hne). exact H.
+
+    (* ======================================== Token / Active *)
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      assert (Hmg : es_msgs gs' = es_msgs gs_mid ++ [mkPkt self sender Echo]).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
+        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+      assert (Hmg_cla : forall q, In q (es_msgs gs') ->
+          In q (es_msgs gs_mid) \/ q = mkPkt self sender Echo).
+      { intro q; rewrite Hmg; intro H; apply in_app_iff in H as [H|H];
+        [left; exact H| destruct H as [<-|[]]; right; reflexivity]. }
+      assert (Hpkt_eq : pkt = mkPkt sender self Token).
+      { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+      assert (Hsender_ne_idle : (proc_of gs0 sender).(ps_phase) <> Idle)
+        by exact (Htsni pkt Hin Hbody).
+      assert (Hself_act : (proc_of gs0 self).(ps_phase) = Active)
+        by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+      assert (Hsender_ne_self : sender <> self).
+      { intro Heq.
+        assert (Hadj := proj1 (proj2 (proj2 Hinv)) pkt Hin).
+        unfold sender, self in Heq. rewrite Heq in Hadj.
+        rewrite adj_irrefl in Hadj. discriminate. }
+      refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+      * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
+        -- apply remove_pkt_in in Ho. rewrite Hprf. exact (Hedni pkt' Ho Hbp).
+        -- subst pkt'. simpl. rewrite Hprf. exact Hsender_ne_idle.
+      * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
+        -- apply remove_pkt_in in Ho. assert (H := Hetsn pkt' Ho Hbp).
+           intro Htin. apply Hmg_cla in Htin as [Hto|Heq].
+           ++ exact (H (remove_pkt_in _ _ _ Hto)).
+           ++ injection Heq; intros; discriminate.
+        -- subst pkt'. simpl. intro Htin. apply Hmg_cla in Htin as [Hto|Heq].
+           ++ (* Hto : In (mkPkt sender self Token) (es_msgs gs_mid) = remove_pkt pkt gs0.msgs *)
+              rewrite <- Hpkt_eq in Hto. exact (tamo_remove_not_in gs0 pkt Htamo Hbody Hin Hto).
+           ++ injection Heq; intros; discriminate.
+      * intros m c Hch. rewrite Hprf in Hch. assert (H := Hcipt m c Hch).
+        intro Hpin. apply Hmg_cla in Hpin as [Ho|Heq].
+        -- exact (H (remove_pkt_in _ _ _ Ho)).
+        -- injection Heq; intros; discriminate.
+      * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
+        -- apply remove_pkt_in in Ho. rewrite Hprf. exact (Henic pkt' Ho Hbp).
+        -- subst pkt'. simpl. rewrite Hprf.
+           intro Hch. rewrite Hpkt_eq in Hin. exact (Hcipt sender self Hch Hin).
+      * intros pkt' Hpin Hbp. apply Hmg_cla in Hpin as [Ho|Heq].
+        -- apply remove_pkt_in in Ho. rewrite Hprf.
+           exact (Hesif pkt' Ho Hbp).
+        -- subst pkt'. simpl. rewrite Hprf.
+           change sender with (ep_src pkt). change self with (ep_dst pkt).
+           exact (Htdnp pkt Hin Hbody).
+      * intros m Hph. rewrite Hprf in Hph.
+        assert (H := Hpecge m Hph).
+        assert (Hag : act_fwds gs' m = act_fwds gs0 m).
+        { apply act_fwds_parent_agree. rewrite Hprf. reflexivity. }
+        rewrite Hag. rewrite Hprf. exact H.
+
+    (* ======================================== Token / Decided, Echo / Idle, Echo / Decided *)
+    (* These three cases are identical: procs unchanged, msgs shorten by remove_pkt. *)
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
+        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+      assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
+      { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
+      refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hedni pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. intro Htin. exact (Hetsn pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
+      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Henic pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hesif pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros m Hph. rewrite Hprf in Hph.
+        assert (H := Hpecge m Hph).
+        assert (Hag : act_fwds gs' m = act_fwds gs0 m) by
+          (apply act_fwds_parent_agree; rewrite Hprf; reflexivity).
+        rewrite Hag. rewrite Hprf. exact H.
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
+        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+      assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
+      { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
+      refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hedni pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. intro Htin. exact (Hetsn pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
+      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Henic pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hesif pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros m Hph. rewrite Hprf in Hph.
+        assert (H := Hpecge m Hph).
+        assert (Hag : act_fwds gs' m = act_fwds gs0 m) by
+          (apply act_fwds_parent_agree; rewrite Hprf; reflexivity).
+        rewrite Hag. rewrite Hprf. exact H.
+
+    (* ======================================== Echo / Active *)
+    + destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par0|] eqn:Hpar0.
+
+        -- (* pending=1, parent=Some par0: Active; sends Echo(self→par0) *)
+           set (np := mkProc Active (Some par0) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np)
+                                            (es_msgs gs_mid ++ [mkPkt self par0 Echo])).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold np; rewrite Hpeq; reflexivity. }
+           assert (Hself_ph_old : (proc_of gs0 self).(ps_phase) = Active)
+             by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+           assert (Hself_par_old : (proc_of gs0 self).(ps_parent) = Some par0)
+             by (unfold proc_of; rewrite <- Hpeq; exact Hpar0).
+           assert (Hpend1 : (proc_of gs0 self).(ps_pending) >= 1).
+           { unfold proc_of. rewrite <- Hpeq. apply Nat.eqb_eq in Hone. rewrite Hone.
+             simpl. exact (Nat.le_refl _). }
+           assert (Hppa_self := Hppa self par0 Hself_ph_old Hself_par_old Hpend1).
+           assert (Hself_not_child_par0 : ~ In self (proc_of gs0 par0).(ps_children))
+             by exact (proj2 Hppa_self).
+           assert (Hpar0_ne_idle : (proc_of gs0 par0).(ps_phase) <> Idle).
+           { assert (Hself_in_all : In self all_nodes) by exact (proj2 (Hpnian pkt Hin)).
+             destruct (Hpia self Hself_in_all par0 Hself_par_old) as [Ha|Hd].
+             - rewrite Ha. discriminate.
+             - rewrite Hd. discriminate. }
+           assert (Hpar0_ne_self : par0 <> self).
+           { intro Heq. subst par0.
+             (* parent(self) = Some self contradicts no_self_parent (INV) *)
+             exact (proj1 (proj2 (proj1 Hinv)) self Hself_par_old). }
+           assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+           { intros q Hne. rewrite Hge, proc_of_upd.
+             destruct (node_eq self q) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+             unfold proc_of. reflexivity. }
+           assert (Hself_par_new : (proc_of gs' self).(ps_parent) = Some par0).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold np. simpl. reflexivity. }
+           assert (Hself_ch_new : (proc_of gs' self).(ps_children) = sender :: ps_children p).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold np. simpl. reflexivity. }
+           assert (Hself_pend_new : (proc_of gs' self).(ps_pending) = Nat.pred (ps_pending p)).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold np. simpl. reflexivity. }
+           assert (Hself_ph_new : (proc_of gs' self).(ps_phase) = Active).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold np. simpl. reflexivity. }
+           assert (Hmsgs_cla : forall q, In q (es_msgs gs') ->
+               In q (es_msgs gs_mid) \/ q = mkPkt self par0 Echo).
+           { intro q. rewrite Hge. simpl es_msgs. intro H.
+             apply in_app_iff in H as [H|H]; [left; exact H|].
+             destruct H as [<-|[]]; right; reflexivity. }
+           assert (Hpkt_echo : pkt = mkPkt sender self Echo).
+           { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+           assert (Hetsn_pkt : ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs0))
+             by exact (Hetsn pkt Hin Hbody).
+           assert (Htsn_par0_self : ~ In (mkPkt par0 self Token) (es_msgs gs0))
+             by exact (Htfpc self par0 Hself_par_old).
+           refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+           ++ (* edni *)
+              intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
+              ** apply remove_pkt_in in Ho. assert (H := Hedni pkt' Ho Hbp).
+                 destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
+                 --- rewrite Hself_ph_new. discriminate.
+                 --- rewrite (Hother _ Hne). exact H.
+              ** subst pkt'. simpl.
+                 destruct (node_eq par0 self) as [Heq|Hne].
+                 --- rewrite Heq. rewrite Hself_ph_new. discriminate.
+                 --- rewrite (Hother par0 Hpar0_ne_self). exact Hpar0_ne_idle.
+           ++ (* etsn *)
+              intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
+              ** apply remove_pkt_in in Ho. assert (H := Hetsn pkt' Ho Hbp).
+                 intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
+                 --- exact (H (remove_pkt_in _ _ _ Hto)).
+                 --- injection Heq; intros; discriminate.
+              ** subst pkt'. simpl. intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
+                 --- apply remove_pkt_in in Hto. exact (Htsn_par0_self Hto).
+                 --- injection Heq; intros; discriminate.
+           ++ (* cipt *)
+              intros m c Hch.
+              destruct (node_eq m self) as [-> | Hne].
+              ** rewrite Hself_ch_new in Hch. simpl in Hch. destruct Hch as [<-|Hrest].
+                 --- (* c = sender: Token(self→sender) ∉ gs'.msgs.
+                         Echo(sender→self)=pkt in bag → etsn: Token(self→sender)∉gs0.msgs.
+                         gs'.msgs ⊆ gs0.msgs (via gs_mid) ++ [Echo(self→par0)]. No Token there. *)
+                     intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
+                     +++ apply remove_pkt_in in Hto.
+                         simpl in Hetsn_pkt. exact (Hetsn_pkt Hto).
+                     +++ injection Heq; intros; discriminate.
+                 --- intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
+                     +++ exact (Hcipt self c Hrest (remove_pkt_in _ _ _ Hto)).
+                     +++ injection Heq; intros; discriminate.
+              ** rewrite (Hother m Hne) in Hch. assert (H := Hcipt m c Hch).
+                 intro Htin. apply Hmsgs_cla in Htin as [Hto|Heq].
+                 --- exact (H (remove_pkt_in _ _ _ Hto)).
+                 --- injection Heq as H1 H2 H3. exact (Hne H1).
+           ++ (* enic *)
+              intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
+              ** assert (Ho_orig := Ho). apply remove_pkt_in in Ho.
+                 assert (H := Henic pkt' Ho Hbp).
+                 destruct (node_eq (ep_dst pkt') self) as [Hdst_eq | Hne].
+                 --- (* dst=self *)
+                     rewrite Hdst_eq. rewrite Hself_ch_new. intro Hch. simpl in Hch.
+                     destruct Hch as [Heqs|Hrest].
+                     +++ (* ep_src pkt' = sender. pkt' ∈ remove_pkt(pkt)(gs0). eamo contradiction. *)
+                         assert (Hpkt'_eq : pkt' = mkPkt sender self Echo).
+                         { destruct pkt' as [src dst body]. simpl in Heqs, Hdst_eq, Hbp |- *.
+                           subst src dst body. reflexivity. }
+                         rewrite Hpkt'_eq, <- Hpkt_echo in Ho_orig.
+                         exact (eamo_remove_not_in gs0 pkt Heamo Hbody Hin Ho_orig).
+                     +++ rewrite Hdst_eq in H. exact (H Hrest).
+                 --- rewrite (Hother _ Hne). exact H.
+              ** (* pkt' = Echo(self→par0): self ∉ children(par0 in gs').
+                     By ppa: self Active, parent=par0, pending≥1 → self∉children(par0). *)
+                 subst pkt'. simpl. rewrite (Hother par0 Hpar0_ne_self).
+                 exact Hself_not_child_par0.
+           ++ (* esif *)
+              intros pkt' Hpin Hbp. apply Hmsgs_cla in Hpin as [Ho|Heq].
+              ** apply remove_pkt_in in Ho. assert (H := Hesif pkt' Ho Hbp).
+                 destruct (node_eq (ep_dst pkt') self) as [Hdst_eq | Hne].
+                 --- rewrite Hdst_eq. rewrite Hself_par_new. intro Heq2.
+                     assert (Hcontra : (proc_of gs0 (ep_dst pkt')).(ps_parent) = Some (ep_src pkt')).
+                     { rewrite Hdst_eq. exact (eq_trans Hself_par_old Heq2). }
+                     exact (H Hcontra).
+                 --- rewrite (Hother _ Hne). exact H.
+              ** subst pkt'. simpl. rewrite (Hother par0 Hpar0_ne_self).
+                 exact (Hnmp self par0 Hself_par_old).
+           ++ (* pec_ge: self: (pred 1 + S|ch|) = 0 + S|ch| ≥ |act_fwds|=|act_fwds_old| by IH with pending=1. *)
+              intros m Hph.
+              destruct (node_eq m self) as [-> | Hne].
+              ** rewrite Hself_pend_new, Hself_ch_new. simpl length. rewrite Nat.add_succ_r.
+                 assert (Hag : act_fwds gs' self = act_fwds gs0 self).
+                 { apply act_fwds_parent_agree.
+                   rewrite Hge, proc_of_upd.
+                   destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+                   simpl. unfold np. simpl. unfold proc_of. rewrite <- Hpeq. exact (eq_sym Hpar0). }
+                 rewrite Hag.
+                 assert (Hph_old : (proc_of gs0 self).(ps_phase) = Active \/
+                                   (proc_of gs0 self).(ps_phase) = Decided) by (left; exact Hself_ph_old).
+                 assert (H := Hpecge self Hph_old).
+                 unfold proc_of in H. rewrite <- Hpeq in H. simpl in H.
+                 lia.
+              ** rewrite (Hother m Hne) in Hph. assert (H := Hpecge m Hph).
+                 assert (Hag : act_fwds gs' m = act_fwds gs0 m).
+                 { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
+                 rewrite Hag. rewrite (Hother m Hne). exact H.
+
+        -- (* pending=1, parent=None: self decides *)
+           set (dec := mkProc Decided None 0 (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self dec) (es_msgs gs_mid)).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold dec; rewrite Hpeq; reflexivity. }
+           assert (Hself_ph_old : (proc_of gs0 self).(ps_phase) = Active)
+             by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+           assert (Hself_par_old : (proc_of gs0 self).(ps_parent) = None)
+             by (unfold proc_of; rewrite <- Hpeq; exact Hpar0).
+           assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+           { intros q Hne. rewrite Hge, proc_of_upd.
+             destruct (node_eq self q) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+             unfold proc_of. reflexivity. }
+           assert (Hself_ch_new : (proc_of gs' self).(ps_children) = sender :: ps_children p).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold dec. simpl. reflexivity. }
+           assert (Hself_ph_new : (proc_of gs' self).(ps_phase) = Decided).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold dec. simpl. reflexivity. }
+           assert (Hself_par_new : (proc_of gs' self).(ps_parent) = None).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold dec. simpl. reflexivity. }
+           assert (Hself_pend_new : (proc_of gs' self).(ps_pending) = 0).
+           { rewrite Hge, proc_of_upd.
+             destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+             simpl. unfold dec. simpl. reflexivity. }
+           assert (Hpkt_echo : pkt = mkPkt sender self Echo).
+           { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+           assert (Hetsn_pkt : ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs0))
+             by exact (Hetsn pkt Hin Hbody).
+           assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
+           { intro q. rewrite Hge. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
+           refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+           ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hedni pkt' Hpin Hbp).
+              destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
+              ** rewrite Hself_ph_new. discriminate.
+              ** rewrite (Hother _ Hne). exact H.
+           ++ intros pkt' Hpin Hbp. assert (H := Hetsn pkt' (Hmsub pkt' Hpin) Hbp).
+              intro Htin. exact (H (Hmsub _ Htin)).
+           ++ intros m c Hch.
+              destruct (node_eq m self) as [-> | Hne].
+              ** rewrite Hself_ch_new in Hch. simpl in Hch. destruct Hch as [<-|Hrest].
+                 --- intro Htin. apply Hmsub in Htin. simpl in Hetsn_pkt. exact (Hetsn_pkt Htin).
+                 --- intro Htin. exact (Hcipt self c Hrest (Hmsub _ Htin)).
+              ** rewrite (Hother m Hne) in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
+           ++ intros pkt' Hpin Hbp. assert (Hpin_orig := Hpin). apply Hmsub in Hpin.
+              assert (H := Henic pkt' Hpin Hbp).
+              destruct (node_eq (ep_dst pkt') self) as [Hdst_eq2 | Hne].
+              ** rewrite Hdst_eq2. rewrite Hself_ch_new. simpl.
+                 intro Hin'. destruct Hin' as [Heqs2|Hrest].
+                 --- assert (Hpkt'_eq : pkt' = mkPkt sender self Echo).
+                     { destruct pkt' as [a b c]. simpl in Heqs2, Hdst_eq2, Hbp |- *.
+                       subst a b c. reflexivity. }
+                     rewrite Hge in Hpin_orig. simpl in Hpin_orig.
+                     rewrite Hpkt'_eq, <- Hpkt_echo in Hpin_orig.
+                     exact (eamo_remove_not_in gs0 pkt Heamo Hbody Hin Hpin_orig).
+                 --- rewrite Hdst_eq2 in H. exact (H Hrest).
+              ** rewrite (Hother _ Hne). exact H.
+           ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hesif pkt' Hpin Hbp).
+              destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
+              ** rewrite Hself_par_new. discriminate.
+              ** rewrite (Hother _ Hne). exact H.
+           ++ intros m Hph.
+              destruct (node_eq m self) as [-> | Hne].
+              ** rewrite Hself_pend_new, Hself_ch_new. simpl length.
+                 assert (Hag : act_fwds gs' self = act_fwds gs0 self).
+                 { apply act_fwds_parent_agree.
+                   rewrite Hge, proc_of_upd.
+                   destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+                   simpl. unfold dec. simpl. unfold proc_of. rewrite <- Hpeq. exact (eq_sym Hpar0). }
+                 rewrite Hag.
+                 assert (Hph_old : (proc_of gs0 self).(ps_phase) = Active \/
+                                   (proc_of gs0 self).(ps_phase) = Decided) by (left; exact Hself_ph_old).
+                 assert (H := Hpecge self Hph_old).
+                 unfold proc_of in H. rewrite <- Hpeq in H. simpl in H.
+                 simpl. apply Nat.eqb_eq in Hone.
+                 rewrite Hone in H. simpl in H. exact H.
+              ** rewrite (Hother m Hne) in Hph. assert (H := Hpecge m Hph).
+                 assert (Hag : act_fwds gs' m = act_fwds gs0 m).
+                 { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
+                 rewrite Hag. rewrite (Hother m Hne). exact H.
+
+      * (* pending ≠ 1: no new Echo *)
+        set (np := mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+        assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np) (es_msgs gs_mid)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+          rewrite Hbody, Hphase, Hone; unfold np; rewrite Hpeq; reflexivity. }
+        assert (Hself_ph_old : (proc_of gs0 self).(ps_phase) = Active)
+          by (unfold proc_of; rewrite Hpeq in Hphase; exact Hphase).
+        assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+        { intros q Hne. rewrite Hge, proc_of_upd.
+          destruct (node_eq self q) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+          unfold proc_of. reflexivity. }
+        assert (Hself_ch_new : (proc_of gs' self).(ps_children) = sender :: ps_children p).
+        { rewrite Hge, proc_of_upd.
+          destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+          simpl. unfold np. simpl. reflexivity. }
+        assert (Hself_ph_new : (proc_of gs' self).(ps_phase) = Active).
+        { rewrite Hge, proc_of_upd.
+          destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+          simpl. unfold np. simpl. reflexivity. }
+        assert (Hself_par_new : (proc_of gs' self).(ps_parent) = ps_parent p).
+        { rewrite Hge, proc_of_upd.
+          destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+          simpl. unfold np. simpl. reflexivity. }
+        assert (Hself_pend_new : (proc_of gs' self).(ps_pending) = Nat.pred (ps_pending p)).
+        { rewrite Hge, proc_of_upd.
+          destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+          simpl. unfold np. simpl. reflexivity. }
+        assert (Hpkt_echo : pkt = mkPkt sender self Echo).
+        { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+        assert (Hetsn_pkt : ~ In (mkPkt (ep_dst pkt) (ep_src pkt) Token) (es_msgs gs0))
+          by exact (Hetsn pkt Hin Hbody).
+        assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
+        { intro q. rewrite Hge. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
+        refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+        ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hedni pkt' Hpin Hbp).
+           destruct (node_eq (ep_dst pkt') self) as [-> | Hne].
+           ** rewrite Hself_ph_new. discriminate.
+           ** rewrite (Hother _ Hne). exact H.
+        ++ intros pkt' Hpin Hbp. assert (H := Hetsn pkt' (Hmsub pkt' Hpin) Hbp).
+           intro Htin. exact (H (Hmsub _ Htin)).
+        ++ intros m c Hch.
+           destruct (node_eq m self) as [-> | Hne].
+           ** rewrite Hself_ch_new in Hch. simpl in Hch. destruct Hch as [<-|Hrest].
+              --- intro Htin. apply Hmsub in Htin. simpl in Hetsn_pkt. exact (Hetsn_pkt Htin).
+              --- intro Htin. exact (Hcipt self c Hrest (Hmsub _ Htin)).
+           ** rewrite (Hother m Hne) in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
+        ++ intros pkt' Hpin Hbp. assert (Hpin_orig := Hpin). apply Hmsub in Hpin.
+           assert (H := Henic pkt' Hpin Hbp).
+           destruct (node_eq (ep_dst pkt') self) as [Hdst3 | Hne].
+           ** rewrite Hdst3. rewrite Hself_ch_new. simpl. intro Hin'. destruct Hin' as [Heqs3|Hrest].
+              --- assert (Hpkt'_eq : pkt' = mkPkt sender self Echo).
+                  { destruct pkt' as [a b c]. simpl in Heqs3, Hdst3, Hbp |- *. subst a b c. reflexivity. }
+                  rewrite Hge in Hpin_orig. simpl in Hpin_orig.
+                  rewrite Hpkt'_eq, <- Hpkt_echo in Hpin_orig.
+                  exact (eamo_remove_not_in gs0 pkt Heamo Hbody Hin Hpin_orig).
+              --- rewrite Hdst3 in H. exact (H Hrest).
+           ** rewrite (Hother _ Hne). exact H.
+        ++ intros pkt' Hpin Hbp. apply Hmsub in Hpin. assert (H := Hesif pkt' Hpin Hbp).
+           destruct (node_eq (ep_dst pkt') self) as [Hdst3 | Hne].
+           ** (* esif for self *)
+              intro Heq. apply H. rewrite Hdst3.
+              unfold proc_of. change (es_procs gs0 self) with p.
+              rewrite Hdst3 in Heq.
+              rewrite <- Hself_par_new. exact Heq.
+           ** rewrite (Hother _ Hne). exact H.
+        ++ intros m Hph.
+           destruct (node_eq m self) as [-> | Hne].
+           ** rewrite Hself_pend_new, Hself_ch_new. simpl length. rewrite Nat.add_succ_r.
+              assert (Hag : act_fwds gs' self = act_fwds gs0 self).
+              { apply act_fwds_parent_agree.
+                rewrite Hge, proc_of_upd.
+                destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+                simpl. unfold np. simpl. unfold proc_of. reflexivity. }
+              rewrite Hag.
+              assert (Hph_old : (proc_of gs0 self).(ps_phase) = Active \/
+                                (proc_of gs0 self).(ps_phase) = Decided) by (left; exact Hself_ph_old).
+              assert (H := Hpecge self Hph_old).
+              unfold proc_of in H. rewrite <- Hpeq in H. simpl in H. lia.
+           ** rewrite (Hother m Hne) in Hph. assert (H := Hpecge m Hph).
+              assert (Hag : act_fwds gs' m = act_fwds gs0 m).
+              { apply act_fwds_parent_agree. rewrite (Hother m Hne). reflexivity. }
+              rewrite Hag. rewrite (Hother m Hne). exact H.
+
+    (* ======================================== Echo / Decided *)
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      assert (Hprf : forall q, proc_of gs' q = proc_of gs0 q)
+        by (intro q; unfold proc_of; rewrite Hpr; reflexivity).
+      assert (Hmsub : forall q, In q (es_msgs gs') -> In q (es_msgs gs0)).
+      { intro q. unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. simpl. intro H. exact (remove_pkt_in _ _ _ H). }
+      refine (conj _ (conj _ (conj _ (conj _ (conj _ _))))).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hedni pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. intro Htin. exact (Hetsn pkt' (Hmsub pkt' Hpin) Hbp (Hmsub _ Htin)).
+      * intros m c Hch. rewrite Hprf in Hch. intro Htin. exact (Hcipt m c Hch (Hmsub _ Htin)).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Henic pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros pkt' Hpin Hbp. rewrite Hprf. exact (Hesif pkt' (Hmsub pkt' Hpin) Hbp).
+      * intros m Hph. rewrite Hprf in Hph. assert (H := Hpecge m Hph).
+        assert (Hag : act_fwds gs' m = act_fwds gs0 m) by
+          (apply act_fwds_parent_agree; rewrite Hprf; reflexivity).
+        rewrite Hag. rewrite Hprf. exact H.
+Qed.
+
+(** Now use the combined step to prove each _holds theorem. *)
+(** Combined theorem for all new invariants. *)
+Definition new_inv_combined (gs : EState) : Prop :=
+  echo_dst_not_idle gs /\ echo_token_sender_not gs /\
+  children_implies_no_parent_token gs /\ echo_not_in_children gs /\
+  echo_src_in_fwds gs /\ pending_exact_count_ge gs /\
+  pending_pos_active gs /\ token_at_most_once gs /\
+  token_from_parent_consumed gs /\ parent_is_active gs /\
+  idle_not_in_children gs /\ token_src_not_idle gs /\ echo_src_not_idle gs /\
+  pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs /\
+  token_dst_not_parent gs /\ no_mutual_parent_prop gs /\ INV gs /\
+  echo_at_most_once gs.
+
+Theorem new_inv_combined_holds : is_invariant ELts new_inv_combined.
+Proof.
+  apply invariant_by_induction.
+  - intros gs Hi.
+    unfold new_inv_combined.
+    refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
+    + intros p H _. rewrite (proj2 Hi) in H. contradiction.
+    + intros p H _. rewrite (proj2 Hi) in H. contradiction.
+    + intros m c H H'. rewrite (proj2 Hi) in H'. contradiction.
+    + intros p H _. rewrite (proj2 Hi) in H. contradiction.
+    + intros p H _. rewrite (proj2 Hi) in H. contradiction.
+    + intros m [H|H]; unfold proc_of in H; rewrite (proj1 Hi m) in H; simpl in H; discriminate.
+    + exact (ppa_init gs Hi).
+    + exact (tamo_init gs Hi).
+    + exact (tfpc_init gs Hi).
+    + exact (pia_init gs Hi).
+    + exact (inic_init gs Hi).
+    + exact (tsni_init gs Hi).
+    + exact (esni_init gs Hi).
+    + exact (proj1 (pnpian_init gs Hi)).
+    + exact (proj2 (pnpian_init gs Hi)).
+    + intros p H _. rewrite (proj2 Hi) in H. contradiction.
+    + intros m par H. unfold proc_of in H. rewrite (proj1 Hi) in H. simpl in H. discriminate.
+    + exact (INV_init gs Hi).
+    + intros p _. rewrite (proj2 Hi) in *. unfold count_pkt. simpl. exact (Nat.le_0_l _).
+  - intros gs lbl gs'
+      [Hedni [Hetsn [Hcipt [Henic [Hesif [Hpecge
+      [Hppa [Htamo [Htfpc [Hpia [Hinic [Htsni [Hesni [Hpnian [Hpian
+      [Htdnp [Hnmp [Hinv Heamo]]]]]]]]]]]]]]]]]] Hstep.
+    unfold new_inv_combined.
+    destruct (new_inv_combined_step gs lbl gs' Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
+              Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep)
+      as [Hedni' [Hetsn' [Hcipt' [Henic' [Hesif' Hpecge']]]]].
+    refine (conj Hedni' (conj Hetsn' (conj Hcipt' (conj Henic' (conj Hesif' (conj Hpecge'
+      (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
+    + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+                      (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
+    + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
+    + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
+    + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
+    + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
+    + exact (tsni_step gs lbl gs' Htsni Hstep).
+    + exact (esni_step gs lbl gs' Hesni Hstep).
+    + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
+    + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
+    + exact (tdnp_step gs lbl gs' Htdnp Htsni Hstep).
+    + exact (nmp_step gs lbl gs' Hnmp Hpia Hpnian (proj1 (proj2 (proj2 Hinv))) Hstep).
+    + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hpin Heq].
+      * exact (INV_step_start gs0 Hinv Hph).
+      * exact (INV_step_deliver gs0 pkt gs0' Hinv Hpin Heq).
+    + exact (eamo_step gs lbl gs' Heamo Hesni Hetsn Hppa Hstep).
+Qed.
+
+Theorem echo_dst_not_idle_holds : is_invariant ELts echo_dst_not_idle.
+Proof. intros gs Hr. exact (proj1 (new_inv_combined_holds gs Hr)). Qed.
+
+Theorem echo_token_sender_not_holds : is_invariant ELts echo_token_sender_not.
+Proof. intros gs Hr. exact (proj1 (proj2 (new_inv_combined_holds gs Hr))). Qed.
+
+Theorem children_implies_no_parent_token_holds : is_invariant ELts children_implies_no_parent_token.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (new_inv_combined_holds gs Hr)))). Qed.
+
+Theorem echo_not_in_children_holds : is_invariant ELts echo_not_in_children.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr))))). Qed.
+
+Theorem echo_src_in_fwds_holds : is_invariant ELts echo_src_in_fwds.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr)))))). Qed.
+
+Theorem pending_exact_count_ge_holds : is_invariant ELts pending_exact_count_ge.
+Proof. intros gs Hr. exact (proj1 (proj2 (proj2 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr))))))). Qed.
+
+Theorem echo_at_most_once_holds : is_invariant ELts echo_at_most_once.
+Proof.
+  intros gs Hr. exact (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (proj2 (new_inv_combined_holds gs Hr))))))))))))))))))).
+Qed.
+
+(* ================================================================== *)
+(** *** Proof of weak_pending_ge_count_holds *)
+
+(** Key algebraic lemma: given children ⊆ act_fwds (cif) and NoDup children (ndc),
+    the filter of act_fwds for "in children" has the same length as children. *)
+Lemma filter_nodup_subset_length (children act : list node) :
+    NoDup children ->
+    (forall c, In c children -> In c act) ->
+    NoDup act ->
+    length children = length (filter (fun n =>
+      existsb (fun c => if node_eq c n then true else false) children) act).
+Proof.
+  intros Hndc Hcif Hndact.
+  revert Hndc Hcif.
+  induction children as [| hd tl IH].
+  - intros _ _. simpl. rewrite filter_false. simpl. reflexivity.
+  - intros Hndc Hcif.
+    apply NoDup_cons_iff in Hndc as [Hhd_notin Hnd_tl].
+    cbn [length].
+    assert (Hhd_in_act : In hd act) by exact (Hcif hd (or_introl eq_refl)).
+    assert (IH' := IH Hnd_tl (fun c Hc => Hcif c (or_intror Hc))).
+    (* existsb extension: for n ≠ hd, (existsb ... (hd::tl)) = (existsb ... tl) *)
+    assert (Hext : forall n, n <> hd ->
+        existsb (fun c => if node_eq c n then true else false) (hd :: tl) =
+        existsb (fun c => if node_eq c n then true else false) tl).
+    { intros n Hne. simpl.
+      destruct (node_eq hd n) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|reflexivity]. }
+    assert (Hhd_true : existsb (fun c => if node_eq c hd then true else false) (hd :: tl) = true).
+    { simpl. destruct (node_eq hd hd) as [_|Hc]; [reflexivity|exact (False_ind _ (Hc eq_refl))]. }
+    assert (Hhd_tl_false : existsb (fun c => if node_eq c hd then true else false) tl = false).
+    { apply not_true_is_false. intro H. apply existsb_exists in H as [c [Hc Heq]].
+      destruct (node_eq c hd) as [-> | _]; [exact (Hhd_notin Hc) | discriminate]. }
+    apply in_split in Hhd_in_act as [act1 [act2 Hact_split]].
+    assert (Hhd_not_act1 : ~ In hd act1).
+    { rewrite Hact_split in Hndact. apply NoDup_remove in Hndact as [_ H].
+      intro Hin. apply H. apply in_or_app. left; exact Hin. }
+    assert (Hhd_not_act2 : ~ In hd act2).
+    { rewrite Hact_split in Hndact. apply NoDup_remove in Hndact as [_ H].
+      intro Hin. apply H. apply in_or_app. right; exact Hin. }
+    (* Relate filter over (hd::tl) and tl for each part *)
+    assert (Hact1_ext : filter (fun n => existsb (fun c => if node_eq c n then true else false) (hd :: tl)) act1 =
+                        filter (fun n => existsb (fun c => if node_eq c n then true else false) tl) act1).
+    { apply filter_ext_in. intros n Hn. apply Hext. intro Heq. subst. exact (Hhd_not_act1 Hn). }
+    assert (Hact2_ext : filter (fun n => existsb (fun c => if node_eq c n then true else false) (hd :: tl)) act2 =
+                        filter (fun n => existsb (fun c => if node_eq c n then true else false) tl) act2).
+    { apply filter_ext_in. intros n Hn. apply Hext. intro Heq. subst. exact (Hhd_not_act2 Hn). }
+    (* Use IH': act already = act1 ++ hd :: act2 so rewrite Hact_split *)
+    rewrite Hact_split in IH'.
+    rewrite filter_app in IH'.
+    (* Now IH' : length tl = length (filter tl act1 ++ filter tl (hd :: act2)) *)
+    (* filter tl (hd :: act2): hd gives false since Hhd_tl_false *)
+    assert (Hfilter_tl_hd : filter (fun n => existsb (fun c => if node_eq c n then true else false) tl) (hd :: act2) =
+                             filter (fun n => existsb (fun c => if node_eq c n then true else false) tl) act2).
+    { simpl. rewrite Hhd_tl_false. reflexivity. }
+    rewrite Hfilter_tl_hd in IH'.
+    (* Now IH' : length tl = length (filter tl act1 ++ filter tl act2) *)
+    (* The goal: S (length tl) = length (filter (hd::tl) act) *)
+    (* Rewrite act as act1 ++ hd :: act2 *)
+    rewrite Hact_split.
+    rewrite (filter_app (fun n => existsb (fun c => if node_eq c n then true else false) (hd :: tl)) act1 (hd :: act2)).
+    (* goal: S (length tl) = length (filter (hd::tl) act1 ++ filter (hd::tl) (hd :: act2)) *)
+    rewrite Hact1_ext.
+    (* filter (hd::tl) (hd :: act2): hd gives true *)
+    assert (Hfilter_hdtl_hd : filter (fun n => existsb (fun c => if node_eq c n then true else false) (hd :: tl)) (hd :: act2) =
+                               hd :: filter (fun n => existsb (fun c => if node_eq c n then true else false) (hd :: tl)) act2).
+    { cbn [filter]. rewrite Hhd_true. reflexivity. }
+    rewrite Hfilter_hdtl_hd.
+    rewrite Hact2_ext.
+    (* goal: S (length tl) = length (filter tl act1 ++ hd :: filter tl act2) *)
+    rewrite app_length. rewrite app_length in IH'.
+    simpl length. simpl length in IH'.
+    lia.
+Qed.
+
+(** nodup_children: NoDup (children(m)) for all m.
+    Proof: children grows by 1 in Echo/Active. The new element (sender) ∉ old_children
+    because Echo(sender→self) is in bag (enic says sender ∉ old_children). NoDup old by IH. *)
+Definition nodup_children_inv (gs : EState) : Prop :=
+  forall m, NoDup (proc_of gs m).(ps_children).
+
+Lemma ndc_init : forall gs, lts_init ELts gs -> nodup_children_inv gs.
+Proof.
+  intros gs [Hproc _] m.
+  unfold proc_of. rewrite Hproc. simpl. exact (NoDup_nil _).
+Qed.
+
+Lemma ndc_step gs lbl gs' :
+    nodup_children_inv gs -> echo_not_in_children gs -> token_at_most_once gs ->
+    lts_trans ELts gs lbl gs' -> nodup_children_inv gs'.
+Proof.
+  intros Hndc Henic Htamo Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+  - (* step_start: init.children = [] *)
+    set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
+    assert (Hother : forall n, n <> initiator -> proc_of gs' n = proc_of gs0 n).
+    { intros n Hne. unfold gs', proc_of, initiator_start. simpl.
+      rewrite upd_other; [reflexivity | intro H; exact (Hne (eq_sym H))]. }
+    assert (Hinit_ch : (proc_of gs' initiator).(ps_children) = []).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    intro m. destruct (node_eq m initiator) as [-> | Hne].
+    + rewrite Hinit_ch. exact (NoDup_nil _).
+    + rewrite (Hother m Hne). exact (Hndc m).
+  - subst gs0'.
+    set (self := ep_dst pkt). set (sender := ep_src pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    intro m.
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+    + (* Token/Idle: self.children = [] *)
+      assert (Hself_ch : (proc_of gs' self).(ps_children) = []).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        destruct (Nat.eqb _ 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+      { intros q Hne. unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. destruct (Nat.eqb _ 0);
+        simpl es_procs; apply upd_other; intro H; exact (Hne (eq_sym H)). }
+      destruct (node_eq m self) as [-> | Hne].
+      * rewrite Hself_ch. exact (NoDup_nil _).
+      * rewrite (Hother m Hne). exact (Hndc m).
+    + (* Token/Active *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of. rewrite Hpr. exact (Hndc m).
+    + (* Token/Decided *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of. rewrite Hpr. exact (Hndc m).
+    + (* Echo/Idle *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of. rewrite Hpr. exact (Hndc m).
+    + (* Echo/Active: sender added to children(self) *)
+      destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par0|] eqn:Hpar0.
+        -- set (np := mkProc Active (Some par0) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np)
+                                            (es_msgs gs_mid ++ [mkPkt self par0 Echo])).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold np; rewrite Hpeq; reflexivity. }
+           destruct (node_eq m self) as [-> | Hne].
+           ++ rewrite Hge, proc_of_upd.
+              destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+              simpl. unfold np. simpl. constructor.
+              ** (* sender ∉ ps_children p *)
+                 intro Hch. exact (Henic pkt Hin Hbody Hch).
+              ** exact (Hndc self).
+           ++ rewrite Hge, proc_of_upd.
+              destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+              unfold proc_of. exact (Hndc m).
+        -- set (dec := mkProc Decided None 0 (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self dec) (es_msgs gs_mid)).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold dec; rewrite Hpeq; reflexivity. }
+           destruct (node_eq m self) as [-> | Hne].
+           ++ rewrite Hge, proc_of_upd.
+              destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+              simpl. unfold dec. simpl. constructor.
+              ** intro Hch.
+                 assert (Hpkt_eq : pkt = mkPkt sender self Echo).
+                 { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+                 exact (Henic pkt Hin Hbody Hch).
+              ** exact (Hndc self).
+           ++ rewrite Hge, proc_of_upd.
+              destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+              unfold proc_of. exact (Hndc m).
+      * set (np := mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+        assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np) (es_msgs gs_mid)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+          rewrite Hbody, Hphase, Hone; unfold np; rewrite Hpeq; reflexivity. }
+        destruct (node_eq m self) as [-> | Hne].
+        ++ rewrite Hge, proc_of_upd.
+           destruct (node_eq self self) as [_|Hc]; [|exact (False_ind _ (Hc eq_refl))].
+           simpl. unfold np. simpl. constructor.
+           ** intro Hch.
+              assert (Hpkt_eq : pkt = mkPkt sender self Echo).
+              { destruct pkt as [a b c]; simpl in *; rewrite Hbody; reflexivity. }
+              exact (Henic pkt Hin Hbody Hch).
+           ** exact (Hndc self).
+        ++ rewrite Hge, proc_of_upd.
+           destruct (node_eq self m) as [Heq|_]; [exact (False_ind _ (Hne (eq_sym Heq)))|].
+           unfold proc_of. exact (Hndc m).
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of. rewrite Hpr. exact (Hndc m).
+Qed.
+
+(** nodup_children_holds: *)
+Theorem nodup_children_holds : is_invariant ELts nodup_children_inv.
+Proof.
+  assert (Hcomb : is_invariant ELts
+    (fun gs => nodup_children_inv gs /\
+               echo_dst_not_idle gs /\ echo_token_sender_not gs /\
+               children_implies_no_parent_token gs /\ echo_not_in_children gs /\
+               echo_src_in_fwds gs /\ pending_exact_count_ge gs /\
+               pending_pos_active gs /\ token_at_most_once gs /\
+               token_from_parent_consumed gs /\ parent_is_active gs /\
+               idle_not_in_children gs /\ token_src_not_idle gs /\ echo_src_not_idle gs /\
+               pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs /\
+               token_dst_not_parent gs /\ no_mutual_parent_prop gs /\ INV gs /\
+               echo_at_most_once gs)).
+  { apply invariant_by_induction.
+    - intros gs Hi.
+      refine (conj (ndc_init gs Hi) _).
+      refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
+      all: first [
+        exact (ppa_init gs Hi) | exact (tamo_init gs Hi) | exact (tfpc_init gs Hi) |
+        exact (pia_init gs Hi) | exact (inic_init gs Hi) | exact (tsni_init gs Hi) |
+        exact (esni_init gs Hi) | exact (INV_init gs Hi) | exact (eamo_init gs Hi) |
+        exact (nmp_init gs Hi) | exact (tdnp_init gs Hi) |
+        exact (proj1 (pnpian_init gs Hi)) | exact (proj2 (pnpian_init gs Hi)) |
+        (intros p H _; rewrite (proj2 Hi) in H; contradiction) |
+        (intros m c H H'; rewrite (proj2 Hi) in H'; contradiction) |
+        (intros m [H|H]; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate) |
+        (intros m par H; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate)
+      ].
+    - intros gs lbl gs'
+        [Hndc [Hedni [Hetsn [Hcipt [Henic [Hesif [Hpecge
+        [Hppa [Htamo [Htfpc [Hpia [Hinic [Htsni [Hesni [Hpnian [Hpian
+        [Htdnp [Hnmp [Hinv Heamo]]]]]]]]]]]]]]]]]]] Hstep.
+      destruct (new_inv_combined_step gs lbl gs' Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
+                Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep)
+        as [Hedni' [Hetsn' [Hcipt' [Henic' [Hesif' Hpecge']]]]].
+      refine (conj _ (conj Hedni' (conj Hetsn' (conj Hcipt' (conj Henic' (conj Hesif' (conj Hpecge'
+        (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _))))))))))))))))))).
+      + exact (ndc_step gs lbl gs' Hndc Henic Htamo Hstep).
+      + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+                        (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
+      + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
+      + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
+      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
+      + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
+      + exact (tsni_step gs lbl gs' Htsni Hstep).
+      + exact (esni_step gs lbl gs' Hesni Hstep).
+      + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
+      + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
+      + exact (tdnp_step gs lbl gs' Htdnp Htsni Hstep).
+      + exact (nmp_step gs lbl gs' Hnmp Hpia Hpnian (proj1 (proj2 (proj2 Hinv))) Hstep).
+      + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hin Heq].
+        * exact (INV_step_start gs0 Hinv Hph).
+        * exact (INV_step_deliver gs0 pkt gs0' Hinv Hin Heq).
+      + exact (eamo_step gs lbl gs' Heamo Hesni Hetsn Hppa Hstep). }
+  intros gs Hr. exact (proj1 (Hcomb gs Hr)).
+Qed.
+
+(** weak_pending_ge_count_holds is proved after children_parent_ne_holds below. *)
+
+(** The key lemma we need for children_in_fwds (cif): *)
+(** children_in_all_nodes: c ∈ children(m) → c ∈ all_nodes *)
+(** children_parent_ne: c ∈ children(m) → parent(m) ≠ Some c *)
+
+(** From the big combined invariant, we have echo_src_in_fwds: Echo(src→dst) ∈ bag → parent(dst) ≠ Some src. *)
+(** And children_are_neighbors: c ∈ children(m) → adj(m,c). *)
+(** And pkt_nodes_in_all_nodes: ep_src pkt ∈ all_nodes when pkt ∈ bag. *)
+
+(** For children_in_all_nodes, we need c ∈ all_nodes. This requires that c was the source of some Echo.
+    But that Echo might not be in the bag anymore. So we need a separate invariant. *)
+
+(** children_in_all_nodes_inv: c ∈ children(m) → c ∈ all_nodes *)
+Definition children_in_all_nodes (gs : EState) : Prop :=
+  forall m c, In c (proc_of gs m).(ps_children) -> In c all_nodes.
+
+(** This invariant follows from pkt_nodes_in_all_nodes: when Echo(c→m) was delivered (adding c to children),
+    c was ep_src of pkt, and pkt ∈ old_bag, so c ∈ all_nodes. Once c is in children, it stays in all_nodes
+    since all_nodes doesn't change (it's a Variable). *)
+
+Lemma cian_step gs lbl gs' :
+    children_in_all_nodes gs ->
+    pkt_nodes_in_all_nodes gs ->
+    lts_trans ELts gs lbl gs' ->
+    children_in_all_nodes gs'.
+Proof.
+  intros Hcian Hpnian Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+  - (* step_start: init.children=[], others unchanged *)
+    set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
+    assert (Hother : forall n, n <> initiator -> proc_of gs' n = proc_of gs0 n).
+    { intros n Hne. unfold gs', proc_of, initiator_start. simpl.
+      rewrite upd_other; [reflexivity | intro H; exact (Hne (eq_sym H))]. }
+    assert (Hinit_ch : (proc_of gs' initiator).(ps_children) = []).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    intros m c Hch.
+    destruct (node_eq m initiator) as [-> | Hne].
+    + rewrite Hinit_ch in Hch. contradiction.
+    + rewrite (Hother m Hne) in Hch. exact (Hcian m c Hch).
+  - subst gs0'.
+    set (self := ep_dst pkt). set (sender := ep_src pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    intros m c Hch.
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+    + (* Token/Idle: self.children = [] *)
+      assert (Hself_ch : (proc_of gs' self).(ps_children) = []).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        destruct (Nat.eqb _ 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+      { intros q Hne. unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. destruct (Nat.eqb _ 0);
+        simpl es_procs; apply upd_other; intro H; exact (Hne (eq_sym H)). }
+      destruct (node_eq m self) as [-> | Hne].
+      * rewrite Hself_ch in Hch. contradiction.
+      * rewrite (Hother m Hne) in Hch. exact (Hcian m c Hch).
+    + (* Token/Active *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
+    + (* Token/Decided *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
+    + (* Echo/Idle *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
+    + (* Echo/Active: self.children grows by sender *)
+      destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par0|] eqn:Hpar0.
+        -- set (np := mkProc Active (Some par0) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np)
+                                            (es_msgs gs_mid ++ [mkPkt self par0 Echo])).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold np; rewrite Hpeq; reflexivity. }
+           rewrite Hge, proc_of_upd in Hch.
+           destruct (node_eq self m) as [<-|Hne].
+           ++ simpl in Hch. unfold np in Hch. simpl in Hch.
+              destruct Hch as [<- | Hrest].
+              ** exact (proj1 (Hpnian pkt Hin)).
+              ** exact (Hcian self c Hrest).
+           ++ unfold proc_of in Hch. exact (Hcian m c Hch).
+        -- set (dec := mkProc Decided None 0 (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self dec) (es_msgs gs_mid)).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold dec; rewrite Hpeq; reflexivity. }
+           rewrite Hge, proc_of_upd in Hch.
+           destruct (node_eq self m) as [<-|Hne].
+           ++ simpl in Hch. unfold dec in Hch. simpl in Hch.
+              destruct Hch as [<- | Hrest].
+              ** exact (proj1 (Hpnian pkt Hin)).
+              ** exact (Hcian self c Hrest).
+           ++ unfold proc_of in Hch. exact (Hcian m c Hch).
+      * set (np := mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+        assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np) (es_msgs gs_mid)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+          rewrite Hbody, Hphase, Hone; unfold np; rewrite Hpeq; reflexivity. }
+        rewrite Hge, proc_of_upd in Hch.
+        destruct (node_eq self m) as [<-|Hne].
+        ++ simpl in Hch. unfold np in Hch. simpl in Hch.
+           destruct Hch as [<- | Hrest].
+           ** exact (proj1 (Hpnian pkt Hin)).
+           ** exact (Hcian self c Hrest).
+        ++ unfold proc_of in Hch. exact (Hcian m c Hch).
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch. rewrite Hpr in Hch. exact (Hcian m c Hch).
+Qed.
+
+Theorem children_in_all_nodes_holds : is_invariant ELts children_in_all_nodes.
+Proof.
+  assert (Hcomb : is_invariant ELts
+    (fun gs => children_in_all_nodes gs /\ pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs)).
+  { apply invariant_by_induction.
+    - intros gs Hi. refine (conj _ (conj (proj1 (pnpian_init gs Hi)) (proj2 (pnpian_init gs Hi)))).
+      intros m c H. rewrite (proj1 Hi) in H. simpl in H. contradiction.
+    - intros gs lbl gs' [Hcian [Hpnian Hpian]] Hstep.
+      refine (conj _ (conj _ _)).
+      + exact (cian_step gs lbl gs' Hcian Hpnian Hstep).
+      + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
+      + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)). }
+  intros gs Hr. exact (proj1 (Hcomb gs Hr)).
+Qed.
+
+(** children_parent_ne: c ∈ children(m) → parent(m) ≠ Some c *)
+(** This follows from echo_src_in_fwds combined with invariant induction:
+    When Echo(c→m) is delivered (adding c to children), esif says parent(m) ≠ Some c.
+    Parent doesn't change in Echo/Active. So parent(m in gs') ≠ Some c after the step.
+    For older children: IH. *)
+Definition children_parent_ne (gs : EState) : Prop :=
+  forall m c, In c (proc_of gs m).(ps_children) ->
+    (proc_of gs m).(ps_parent) <> Some c.
+
+Lemma cpne_step gs lbl gs' :
+    children_parent_ne gs -> echo_src_in_fwds gs ->
+    lts_trans ELts gs lbl gs' -> children_parent_ne gs'.
+Proof.
+  intros Hcpne Hesif Hstep.
+  destruct Hstep as [gs0 Hph0 | gs0 pkt gs0' Hin Heq].
+  - (* step_start *)
+    set (gs' := initiator_start node_eq initiator all_nodes adj gs0).
+    assert (Hother : forall n, n <> initiator -> proc_of gs' n = proc_of gs0 n).
+    { intros n Hne. unfold gs', proc_of, initiator_start. simpl.
+      rewrite upd_other; [reflexivity | intro H; exact (Hne (eq_sym H))]. }
+    assert (Hinit_ch : (proc_of gs' initiator).(ps_children) = []).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    assert (Hinit_par : (proc_of gs' initiator).(ps_parent) = None).
+    { unfold gs', proc_of, initiator_start. simpl. rewrite upd_self. simpl. reflexivity. }
+    intros m c Hch.
+    destruct (node_eq m initiator) as [-> | Hne].
+    + rewrite Hinit_ch in Hch. contradiction.
+    + rewrite (Hother m Hne) in Hch. rewrite (Hother m Hne).
+      exact (Hcpne m c Hch).
+  - subst gs0'.
+    set (self := ep_dst pkt). set (sender := ep_src pkt).
+    set (gs_mid := mkEchoState gs0.(es_procs) (remove_pkt node_eq pkt gs0.(es_msgs))).
+    set (gs' := handle_msg node_eq all_nodes adj self gs_mid pkt).
+    set (p := gs_mid.(es_procs) self).
+    assert (Hpeq : p = gs0.(es_procs) self) by reflexivity.
+    intros m c Hch.
+    destruct (ep_body pkt) eqn:Hbody; destruct (ps_phase p) eqn:Hphase.
+    + (* Token/Idle: self.children=[] *)
+      assert (Hself_ch : (proc_of gs' self).(ps_children) = []).
+      { unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p. rewrite Hbody, Hphase.
+        destruct (Nat.eqb _ 0); simpl es_procs; rewrite upd_self; simpl; reflexivity. }
+      assert (Hother : forall q, q <> self -> proc_of gs' q = proc_of gs0 q).
+      { intros q Hne. unfold gs', proc_of, handle_msg. change (es_procs gs_mid self) with p.
+        rewrite Hbody, Hphase. destruct (Nat.eqb _ 0);
+        simpl es_procs; apply upd_other; intro H; exact (Hne (eq_sym H)). }
+      destruct (node_eq m self) as [-> | Hne].
+      * rewrite Hself_ch in Hch. contradiction.
+      * rewrite (Hother m Hne) in Hch. rewrite (Hother m Hne). exact (Hcpne m c Hch).
+    + (* Token/Active *)
+      assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
+    + (* Echo/Active: sender added to children(self). parent(self) preserved (or changed to None). *)
+      destruct (Nat.eqb (ps_pending p) 1) eqn:Hone.
+      * destruct (ps_parent p) as [par0|] eqn:Hpar0.
+        -- set (np := mkProc Active (Some par0) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np)
+                                            (es_msgs gs_mid ++ [mkPkt self par0 Echo])).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold np; rewrite Hpeq; reflexivity. }
+           rewrite Hge, proc_of_upd in Hch.
+           rewrite Hge, proc_of_upd.
+           destruct (node_eq self m) as [<-|Hne].
+           ++ simpl in Hch |- *. unfold np in Hch |- *. simpl in Hch |- *.
+              destruct Hch as [<- | Hrest].
+              ** (* c = sender: parent(self in gs') = Some par0. Need par0 ≠ sender.
+                     From esif: Echo(sender→self) ∈ gs0 → parent(self in gs0) ≠ Some sender.
+                     parent(self in gs0) = Some par0 (Hpar0). So par0 ≠ sender. ✓ *)
+                 intro Heq. injection Heq as Heq'.
+                 (* Heq' : par0 = sender = ep_src pkt *)
+                 (* Hesif says: ep_dst pkt = self, ep_src pkt = sender, so parent(self) ≠ Some sender *)
+                 assert (H := Hesif pkt Hin Hbody).
+                 (* H : (proc_of gs0 (ep_dst pkt)).(ps_parent) <> Some (ep_src pkt) *)
+                 (* = parent(self).(gs0) <> Some sender *)
+                 assert (Hpar_self : (proc_of gs0 self).(ps_parent) = Some (ep_src pkt)).
+                 { unfold proc_of. rewrite <- Hpeq. rewrite Hpar0. f_equal. exact Heq'. }
+                 unfold self in H. exact (H Hpar_self).
+              ** intro Hc. apply (Hcpne self c Hrest). unfold proc_of. rewrite <- Hpeq. rewrite Hpar0. exact Hc.
+           ++ unfold proc_of in Hch |- *. exact (Hcpne m c Hch).
+        -- set (dec := mkProc Decided None 0 (sender :: ps_children p)).
+           assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self dec) (es_msgs gs_mid)).
+           { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+             rewrite Hbody, Hphase, Hone, Hpar0; unfold dec; rewrite Hpeq; reflexivity. }
+           rewrite Hge, proc_of_upd in Hch.
+           rewrite Hge, proc_of_upd.
+           destruct (node_eq self m) as [<-|Hne].
+           ++ simpl in Hch |- *. unfold dec in Hch |- *. simpl in Hch |- *.
+              destruct Hch as [<- | Hrest].
+              ** discriminate.
+              ** intro Hc. apply (Hcpne self c Hrest). unfold proc_of. rewrite <- Hpeq. rewrite Hpar0. exact Hc.
+           ++ unfold proc_of in Hch |- *. exact (Hcpne m c Hch).
+      * set (np := mkProc Active (ps_parent p) (Nat.pred (ps_pending p)) (sender :: ps_children p)).
+        assert (Hge : gs' = mkEchoState (update_proc node_eq (es_procs gs0) self np) (es_msgs gs_mid)).
+        { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p;
+          rewrite Hbody, Hphase, Hone; unfold np; rewrite Hpeq; reflexivity. }
+        rewrite Hge, proc_of_upd in Hch.
+        rewrite Hge, proc_of_upd.
+        destruct (node_eq self m) as [<-|Hne].
+        ++ simpl in Hch |- *. unfold np in Hch |- *. simpl in Hch |- *.
+           destruct Hch as [<- | Hrest].
+           ** (* c = sender: parent(self in gs') = ps_parent p. Need ps_parent p ≠ Some sender.
+                  From esif: parent(self in gs0)=(proc_of gs0 self).(ps_parent)=ps_parent p ≠ Some sender. *)
+              assert (H := Hesif pkt Hin Hbody). simpl in H.
+              intro Heq. apply H.
+              unfold proc_of. change (es_procs gs0 self) with p. exact Heq.
+           ** exact (Hcpne self c Hrest).
+        ++ unfold proc_of in Hch |- *. exact (Hcpne m c Hch).
+    + assert (Hpr : es_procs gs' = es_procs gs0).
+      { unfold gs'; unfold handle_msg; change (es_procs gs_mid self) with p; rewrite Hbody, Hphase; reflexivity. }
+      unfold proc_of in Hch |- *. rewrite Hpr in Hch |- *. exact (Hcpne m c Hch).
+Qed.
+
+Theorem children_parent_ne_holds : is_invariant ELts children_parent_ne.
+Proof.
+  assert (Hcomb : is_invariant ELts
+    (fun gs => children_parent_ne gs /\
+               echo_dst_not_idle gs /\ echo_token_sender_not gs /\
+               children_implies_no_parent_token gs /\ echo_not_in_children gs /\
+               echo_src_in_fwds gs /\ pending_exact_count_ge gs /\
+               pending_pos_active gs /\ token_at_most_once gs /\
+               token_from_parent_consumed gs /\ parent_is_active gs /\
+               idle_not_in_children gs /\ token_src_not_idle gs /\ echo_src_not_idle gs /\
+               pkt_nodes_in_all_nodes gs /\ parent_in_all_nodes gs /\
+               token_dst_not_parent gs /\ no_mutual_parent_prop gs /\ INV gs /\
+               echo_at_most_once gs)).
+  { apply invariant_by_induction.
+    - intros gs Hi.
+      refine (conj _ _).
+      + intros m c H. rewrite (proj1 Hi) in H. simpl in H. contradiction.
+      + refine (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _)))))))))))))))))).
+        all: first [
+          exact (ppa_init gs Hi) | exact (tamo_init gs Hi) | exact (tfpc_init gs Hi) |
+          exact (pia_init gs Hi) | exact (inic_init gs Hi) | exact (tsni_init gs Hi) |
+          exact (esni_init gs Hi) | exact (INV_init gs Hi) | exact (eamo_init gs Hi) |
+          exact (nmp_init gs Hi) | exact (tdnp_init gs Hi) |
+          exact (proj1 (pnpian_init gs Hi)) | exact (proj2 (pnpian_init gs Hi)) |
+          (intros p H _; rewrite (proj2 Hi) in H; contradiction) |
+          (intros m c H H'; rewrite (proj2 Hi) in H'; contradiction) |
+          (intros m [H|H]; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate) |
+          (intros m par H; unfold proc_of in H; rewrite (proj1 Hi) in H; simpl in H; discriminate)
+        ].
+    - intros gs lbl gs'
+        [Hcpne [Hedni [Hetsn [Hcipt [Henic [Hesif [Hpecge
+        [Hppa [Htamo [Htfpc [Hpia [Hinic [Htsni [Hesni [Hpnian [Hpian
+        [Htdnp [Hnmp [Hinv Heamo]]]]]]]]]]]]]]]]]]] Hstep.
+      destruct (new_inv_combined_step gs lbl gs' Hedni Hetsn Hcipt Henic Hesif Hpecge Heamo
+                Hppa Htamo Htfpc Hpia Hinic Htsni Hesni Hpnian Hpian Htdnp Hnmp Hinv Hstep)
+        as [Hedni' [Hetsn' [Hcipt' [Henic' [Hesif' Hpecge']]]]].
+      refine (conj _ (conj Hedni' (conj Hetsn' (conj Hcipt' (conj Henic' (conj Hesif' (conj Hpecge'
+        (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ (conj _ _))))))))))))))))))).
+      + exact (cpne_step gs lbl gs' Hcpne Hesif Hstep).
+      + exact (ppa_step gs lbl gs' Hppa Htfpc Hinic Hesni
+                        (proj1 (proj2 (proj2 Hinv))) (proj1 (proj1 Hinv)) Hstep).
+      + exact (tamo_step gs lbl gs' Htamo Htsni Hstep).
+      + exact (tfpc_step gs lbl gs' Htamo Htfpc Hpia Hstep).
+      + exact (pia_step gs lbl gs' Hpia Htsni Hstep).
+      + exact (inic_step gs lbl gs' Hinic Htsni Hesni Hstep).
+      + exact (tsni_step gs lbl gs' Htsni Hstep).
+      + exact (esni_step gs lbl gs' Hesni Hstep).
+      + exact (proj1 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
+      + exact (proj2 (pnpian_step gs lbl gs' Hpnian Hpian Hstep)).
+      + exact (tdnp_step gs lbl gs' Htdnp Htsni Hstep).
+      + exact (nmp_step gs lbl gs' Hnmp Hpia Hpnian (proj1 (proj2 (proj2 Hinv))) Hstep).
+      + destruct Hstep as [gs0 Hph | gs0 pkt gs0' Hin Heq].
+        * exact (INV_step_start gs0 Hinv Hph).
+        * exact (INV_step_deliver gs0 pkt gs0' Hinv Hin Heq).
+      + exact (eamo_step gs lbl gs' Heamo Hesni Hetsn Hppa Hstep). }
+  intros gs Hr. exact (proj1 (Hcomb gs Hr)).
+Qed.
+
+Theorem weak_pending_ge_count_holds : is_invariant ELts weak_pending_ge_count.
+Proof.
+  intros gs Hr m Hph.
+  set (children := (proc_of gs m).(ps_children)).
+  set (act := act_fwds gs m).
+  set (pending := (proc_of gs m).(ps_pending)).
+  assert (Hpecge := pending_exact_count_ge_holds gs Hr m Hph).
+  fold children act pending in Hpecge.
+  assert (Hcif : forall c, In c children -> In c act).
+  { intros c Hch. unfold act, children.
+    apply act_fwds_spec. split; [| split].
+    - exact (children_in_all_nodes_holds gs Hr m c Hch).
+    - exact (proj1 (proj2 (INV_holds gs Hr)) m c Hch).
+    - exact (children_parent_ne_holds gs Hr m c Hch). }
+  assert (Hndc : NoDup children) by exact (nodup_children_holds gs Hr m).
+  assert (Hndact : NoDup act) by exact (nodup_act_fwds gs m).
+  unfold remaining_fwds. fold act children.
+  assert (Hpart : forall (f : node -> bool) (l : list node),
+      length (filter f l) + length (filter (fun x => negb (f x)) l) = length l).
+  { intros f l. induction l as [|hd tl IH]; [simpl; reflexivity|].
+    simpl. destruct (f hd); simpl; lia. }
+  set (f := fun n => existsb (fun c => if node_eq c n then true else false) children).
+  assert (Hpart_act := Hpart f act).
+  assert (Hlen_eq : length children = length (filter f act))
+    by exact (filter_nodup_subset_length children act Hndc Hcif Hndact).
+  unfold f in *. lia.
+Qed.
+
+(* ================================================================== *)
+(** *** pending_propagates and pending_chain_to_initiator *)
+
+Lemma pending_propagates :
+  forall gs, reachable ELts gs ->
+    forall m par,
+      In m all_nodes ->
+      (proc_of gs m).(ps_phase) = Active ->
+      (proc_of gs m).(ps_parent) = Some par ->
+      (proc_of gs m).(ps_pending) >= 1 ->
+      (proc_of gs par).(ps_pending) >= 1.
+Proof.
+  intros gs Hr m par Hm Hact Hpar Hpend.
+  (* par ∈ all_nodes *)
+  assert (Hpar_in : In par all_nodes)
+    by exact (parent_in_all_nodes_holds gs Hr m par Hpar).
+  (* par is Active or Decided *)
+  assert (Hpar_phase : (proc_of gs par).(ps_phase) = Active \/
+                       (proc_of gs par).(ps_phase) = Decided)
+    by exact (parent_is_active_holds gs Hr m Hm par Hpar).
+  (* m ∉ children(par): from pending_pos_active *)
+  assert (Hm_not_child : ~ In m (proc_of gs par).(ps_children))
+    by exact (proj2 (pending_pos_active_holds gs Hr m par Hact Hpar Hpend)).
+  (* m ∈ act_fwds(par): from parent_is_neighbor (adj par m) + adj_sym + no_mutual_parent + m ∈ all_nodes *)
+  assert (Hadj_m_par : adj m par = true)
+    by exact (proj1 (proj1 (INV_holds gs Hr)) m par Hpar).
+  assert (Hadj_par_m : adj par m = true) by exact (adj_sym m par Hadj_m_par).
+  assert (Hno_mut : (proc_of gs par).(ps_parent) <> Some m)
+    by exact (no_mutual_parent_holds gs Hr m par Hpar).
+  assert (Hm_in_fwds : In m (act_fwds gs par)).
+  { apply act_fwds_spec. exact (conj Hm (conj Hadj_par_m Hno_mut)). }
+  (* remaining_fwds(par) ≥ 1: m ∈ act_fwds(par) and m ∉ children(par) *)
+  assert (Hrem : remaining_fwds gs par >= 1)
+    by exact (remaining_fwds_pos gs par m Hm_in_fwds Hm_not_child).
+  (* pending(par) ≥ remaining_fwds(par) ≥ 1 *)
+  apply Nat.le_trans with (m := remaining_fwds gs par); [exact Hrem |].
+  exact (weak_pending_ge_count_holds gs Hr par Hpar_phase).
+Qed.
+
+Lemma pending_chain_to_initiator :
+  forall gs, reachable ELts gs ->
+    forall m,
+      In m all_nodes ->
+      (proc_of gs m).(ps_phase) = Active ->
+      (proc_of gs m).(ps_pending) >= 1 ->
+      (proc_of gs initiator).(ps_pending) >= 1.
+Proof.
+  intros gs Hr.
+  (* Use well-founded induction on k from reaches_initiator. *)
+  assert (Hchain : forall m k, In m all_nodes ->
+      parent_path gs m k = Some initiator ->
+      (proc_of gs m).(ps_phase) = Active ->
+      (proc_of gs m).(ps_pending) >= 1 ->
+      (proc_of gs initiator).(ps_pending) >= 1).
+  { intros m k. revert m. induction k as [| k' IHk].
+    - simpl. intros m _ Heq Hact Hpend. injection Heq as <-. exact Hpend.
+    - simpl. intros m Hm Hpath Hact Hpend.
+      destruct ((proc_of gs m).(ps_parent)) as [par|] eqn:Hpar; [| discriminate].
+      assert (Hpend_par : (proc_of gs par).(ps_pending) >= 1)
+        by exact (pending_propagates gs Hr m par Hm Hact Hpar Hpend).
+      destruct (parent_is_active_holds gs Hr m Hm par Hpar) as [Hact_par | Hdec_par].
+      + apply (IHk par).
+        * exact (parent_in_all_nodes_holds gs Hr m par Hpar).
+        * exact Hpath.
+        * exact Hact_par.
+        * exact Hpend_par.
+      + exfalso.
+        assert (Hz := decided_pending_zero_holds gs Hr par Hdec_par).
+        rewrite Hz in Hpend_par. inversion Hpend_par. }
+  intros m Hm Hact Hpend.
+  destruct (node_eq m initiator) as [-> | Hne].
+  - exact Hpend.
+  - destruct (active_non_init_has_chain gs Hr m Hm Hact Hne) as [k Hk].
+    exact (Hchain m k Hm Hk Hact Hpend).
+Qed.
+
+Theorem no_token_idle_decided :
   forall gs, reachable ELts gs -> initiator_decided gs ->
     forall pkt, In pkt (es_msgs gs) -> ep_body pkt = Token ->
       (proc_of gs (ep_dst pkt)).(ps_phase) <> Idle.
+Proof.
+  intros gs Hr Hdec pkt Hpin Hbody Hidle.
+  set (n := ep_dst pkt). set (m := ep_src pkt).
+  (* m is not Idle *)
+  assert (Hm_not_idle : (proc_of gs m).(ps_phase) <> Idle)
+    by exact (token_src_not_idle_holds gs Hr pkt Hpin Hbody).
+  (* n ∈ act_fwds(m) *)
+  assert (Hadj : adj m n = true) by exact (valid_packets_holds gs Hr pkt Hpin).
+  assert (Hpar_ne : (proc_of gs m).(ps_parent) <> Some n)
+    by exact (token_dst_not_parent_holds gs Hr pkt Hpin Hbody).
+  assert (Hn_in_all : In n all_nodes)
+    by exact (proj2 (pkt_nodes_in_all_nodes_holds gs Hr pkt Hpin)).
+  assert (Hm_in_all : In m all_nodes)
+    by exact (proj1 (pkt_nodes_in_all_nodes_holds gs Hr pkt Hpin)).
+  assert (Hn_in_fwds : In n (act_fwds gs m)).
+  { apply act_fwds_spec. exact (conj Hn_in_all (conj Hadj Hpar_ne)). }
+  (* n ∉ children(m): n is Idle *)
+  assert (Hn_not_child : ~ In n (proc_of gs m).(ps_children))
+    by exact (idle_not_in_children_holds gs Hr m n Hidle).
+  (* remaining_fwds(m) ≥ 1 *)
+  assert (Hrem : remaining_fwds gs m >= 1)
+    by exact (remaining_fwds_pos gs m n Hn_in_fwds Hn_not_child).
+  (* m is Active or Decided *)
+  assert (Hm_phase : (proc_of gs m).(ps_phase) = Active \/
+                     (proc_of gs m).(ps_phase) = Decided).
+  { destruct (ps_phase (proc_of gs m)) eqn:Hph.
+    - exact (False_ind _ (Hm_not_idle eq_refl)).
+    - left; reflexivity.
+    - right; reflexivity. }
+  (* pending(m) ≥ 1 via weak_pending_ge_count *)
+  assert (Hpend : (proc_of gs m).(ps_pending) >= 1).
+  { apply Nat.le_trans with (m := remaining_fwds gs m); [exact Hrem |].
+    exact (weak_pending_ge_count_holds gs Hr m Hm_phase). }
+  (* pending(initiator) ≥ 1 *)
+  assert (Hpend_init : (proc_of gs initiator).(ps_pending) >= 1).
+  { destruct Hm_phase as [Hact | Hdecm].
+    - exact (pending_chain_to_initiator gs Hr m Hm_in_all Hact Hpend).
+    - (* m Decided → m = initiator *)
+      assert (Hm_init : m = initiator).
+      { destruct (node_eq m initiator) as [Heq | Hne]; [exact Heq |].
+        exact (False_ind _ (non_init_not_decided_holds gs Hr m Hne Hdecm)). }
+      rewrite <- Hm_init. exact Hpend. }
+  (* decided_pending_zero: pending(initiator) = 0 *)
+  assert (Hzero := decided_pending_zero_holds gs Hr initiator Hdec).
+  rewrite Hzero in Hpend_init. inversion Hpend_init.
+Qed.
 
 (** Wave-depth axioms for the token propagation argument.
     [wave_depth n] is n's depth in the BFS spanning tree rooted at [initiator].
