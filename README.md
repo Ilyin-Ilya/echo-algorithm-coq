@@ -1,11 +1,14 @@
 # Echo Algorithm — Rocq/Coq Proof
 
-A mechanized proof of the **Echo (Segall/Chang) distributed algorithm** in [Rocq 9.0](https://rocq-prover.org/).
+A mechanized proof of decision-time correctness for the **Echo
+(Segall/Chang) distributed algorithm** in [Rocq 9.0](https://rocq-prover.org/).
 
 The Echo algorithm constructs a spanning tree rooted at an initiator via a two-phase token wave:
 1. Tokens flow outward from the initiator to all nodes.
 2. Echoes flow inward from leaves back to the initiator.
-The initiator *decides* once it has received an echo on every incident edge, at which point the spanning tree is complete.
+The initiator *decides* once it has received an echo on every incident edge.
+The main theorem proves that whenever this decision state is reached, the
+resulting parent pointers form a complete rooted spanning structure.
 
 ---
 
@@ -53,48 +56,48 @@ All results are proved by `Qed` (no `Admitted`).
 | `valid_packets_holds` | Every in-flight packet travels along an existing edge |
 | `active_non_init_parent_holds` | Non-initiator nodes in Active always have `ps_parent = Some _` (invariant) |
 | `non_init_not_decided_holds` | Non-initiator nodes never reach the Decided phase (invariant) |
+| `no_token_idle_decided` | At decision, no in-flight Token targets an Idle node |
 | `decided_implies_all_active` | When the initiator decides, every non-initiator node is Active |
 | `decided_reaches_initiator` | When the initiator decides, every node has a `ps_parent` chain to it |
 | `start_decreases_idle` | Firing `step_start` strictly decreases the number of Idle nodes |
 
 ---
 
-## Axioms and assumptions
+## Parameters and assumptions
 
-The correctness theorems are proved *relative to* the following assumptions declared as `Variable` in `EchoCorrectness.v`.
+The development contains no `Axiom`, `Admitted`, or `admit`. Running
+`Print Assumptions decided_reaches_initiator` reports `Closed under the global
+context`. The theorem is parameterized by the following data and hypotheses,
+all declared as `Variable` in `EchoCorrectness.v`.
 
-### Standard graph axioms (expected of any reasonable network)
-
-| Assumption | Meaning |
-|------------|---------|
-| `adj_sym` | The graph is undirected: if `u–v` then `v–u` |
+| Parameter or hypothesis | Meaning |
+|-------------------------|---------|
+| `node` | Abstract type of node identifiers |
+| `node_eq` | Decidable equality on nodes |
+| `initiator` | Root of the Echo wave |
+| `all_nodes` | Finite list of nodes covered by the theorem |
+| `adj` | Boolean adjacency test |
+| `adj_sym` | The graph is undirected: if `u-v` then `v-u` |
 | `adj_irrefl` | No self-loops: `adj n n = false` |
-| `graph_connected` | Every node has a directed path to the initiator |
 | `initiator_in_nodes` | The initiator appears in `all_nodes` |
 | `nodup_nodes` | `all_nodes` has no duplicates |
+| `wave_depth` | Natural-valued connectivity certificate; it is not read by the algorithm |
+| `wave_depth_props` | The root has depth zero and every listed non-root node has an adjacent listed node of smaller depth |
 
-### Fairness / scheduling axiom
+The parent-chain, one-hop propagation, pending-chain, and
+`decided_implies_all_active` results are proved theorems, not additional
+assumptions.
 
-| Assumption | Meaning |
-|------------|---------|
-| `reliable_delivery` | Every in-flight packet is eventually delivered. This is a liveness / fairness property that cannot be derived from the LTS structure alone — it constrains the scheduler. |
+### What is not assumed or proved
 
-### Wave-depth measure (for the propagation argument)
+There is no `reliable_delivery` or fairness premise. The transition relation may
+deliver any packet currently in the bag, so the safety theorem covers every
+finite delivery order. It does not prove that every execution eventually
+decides: a scheduler may stop while packets remain in flight. The current
+startup rule also leaves a one-node network Active with pending count zero.
 
-| Assumption | Meaning |
-|------------|---------|
-| `wave_depth` | A `nat`-valued depth assigned to each node; the initiator has depth 0 |
-| `wave_depth_nbr` | Every non-initiator has at least one neighbor with strictly smaller depth |
-
-### Wave-propagation axioms
-
-`decided_implies_all_active` is now **proved** (as a `Theorem`), not axiomatized.
-The proof uses well-founded induction on `wave_depth` and reduces to a single one-hop axiom:
-
-| Assumption | Meaning |
-|------------|---------|
-| `token_propagates` | In any decided reachable state, every non-initiator at depth ≤ d is Active. The depth parameter makes this suitable as an induction hypothesis: the proof of `decided_implies_all_active` applies it with `d = wave_depth n`. Capturing this formally from execution traces requires a deeper causal-ordering argument; we axiomatize it to keep the development modular. |
-| `active_non_init_has_chain` (A5) | Every Active non-initiator node has a `ps_parent` chain leading to the initiator. Provable by induction on token wave depth, but requires tracking parent-chain changes across state updates. Axiomatized for modularity. |
+For a guided explanation of the proof and its invariants, see
+[`PROOF_EXPLAINED.md`](PROOF_EXPLAINED.md).
 
 ---
 

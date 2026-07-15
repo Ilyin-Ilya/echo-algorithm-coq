@@ -12,3 +12,6 @@ Makefile.coq.conf
 
 # Local session notes
 FINDINGS.md
+
+# Local manuscript workspace; never commit publication files
+/paper/
