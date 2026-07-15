@@ -32,7 +32,7 @@ Section EchoCorrectness.
 Variable node      : Type.
 (** Decidable equality on nodes, needed for update_proc and remove_pkt. *)
 Variable node_eq   : forall (n m : node), {n = m} + {n <> m}.
-(** The unique initiator: the node that fires step_start and eventually decides. *)
+(** The unique initiator: the only node permitted to fire [step_start]. *)
 Variable initiator : node.
 (** A finite enumeration of all nodes, used for pending counts and idle_count. *)
 Variable all_nodes : list node.
@@ -569,8 +569,8 @@ Qed.
 (* ================================================================== *)
 (** ** 4. Preservation — step_start *)
 
-(** step_start fires exactly once: the initiator moves Idle → Active and
-    sends Tokens to all neighbors.  Key obligations:
+(** When [step_start] fires, the initiator moves Idle → Active and sends
+    Tokens to all neighbors.  Key preservation obligations:
     - parent_is_neighbor: initiator's new parent is None (no case to check);
       all other nodes unchanged.
     - init_idle_empty: initiator is now Active, so the hypothesis (Idle)
@@ -6983,14 +6983,11 @@ Proof.
 Qed.
 
 (* ================================================================== *)
-(** ** 9. Termination measure *)
+(** ** 9. Startup progress measure *)
 
-(** Termination measure: number of Idle nodes remaining.
-    Every execution step either fires step_start (which decreases idle_count
-    by 1, proved in start_decreases_idle) or delivers a packet (which either
-    wakes an Idle node, also decreasing the count, or processes an already
-    Active/Decided node, never increasing it).  So the execution must
-    terminate in at most |all_nodes| steps for the wave to fully propagate. *)
+(** Number of listed nodes that remain Idle.  The development proves below
+    only that [step_start] strictly decreases this count.  It does not use
+    [idle_count] as a termination measure or prove eventual decision. *)
 Definition idle_count (gs : EState) : nat :=
   length (filter (fun n => match (proc_of gs n).(ps_phase) with
                            | Idle => true | _ => false end) all_nodes).

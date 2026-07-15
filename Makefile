@@ -1,18 +1,22 @@
-ROCQ_APP  := /Applications/Rocq-Platform~9.0~2025.08.app/Contents/Resources
-COQBIN    := $(ROCQ_APP)/bin/
-ROCQLIB   := $(ROCQ_APP)/lib/coq
+COQBIN ?=
+ROCQLIB ?=
 
-export COQBIN
-export ROCQLIB
+# Use tools from PATH by default. COQBIN may name an installation-specific
+# binary directory; normalize it so callers need not include a trailing slash.
+ROCQ_BIN_DIR := $(if $(strip $(COQBIN)),$(patsubst %/,%,$(strip $(COQBIN)))/,)
+COQMAKEFILE := $(ROCQ_BIN_DIR)coq_makefile
+ROCQ_ENV := $(if $(strip $(ROCQLIB)),ROCQLIB="$(ROCQLIB)",)
 
-.PHONY: all clean Makefile.coq
+.PHONY: all clean
 
 all: Makefile.coq
-	$(MAKE) -f Makefile.coq COQBIN=$(COQBIN) ROCQLIB=$(ROCQLIB)
+	$(ROCQ_ENV) $(MAKE) -f Makefile.coq COQBIN="$(ROCQ_BIN_DIR)"
 
 Makefile.coq: _CoqProject
-	$(COQBIN)coq_makefile -f _CoqProject -o Makefile.coq
+	$(ROCQ_ENV) $(COQMAKEFILE) -f _CoqProject -o Makefile.coq
 
-clean: Makefile.coq
-	$(MAKE) -f Makefile.coq clean
-	rm -f Makefile.coq Makefile.coq.conf
+clean:
+	@if [ -f Makefile.coq ]; then \
+		$(ROCQ_ENV) $(MAKE) -f Makefile.coq COQBIN="$(ROCQ_BIN_DIR)" clean; \
+	fi
+	$(RM) Makefile.coq Makefile.coq.conf
