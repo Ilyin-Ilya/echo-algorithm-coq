@@ -14,14 +14,24 @@ resulting parent pointers form a complete rooted spanning structure.
 
 ## Building
 
-Requires Rocq Platform 9.0.
+Requires Rocq 9.0 and GNU Make. If the Rocq tools are on `PATH`, build with:
 
 ```bash
-export PATH="/Applications/Rocq-Platform~9.0~2025.08.app/Contents/Resources/bin:$PATH"
-export ROCQLIB="/Applications/Rocq-Platform~9.0~2025.08.app/Contents/Resources/lib/coq"
-
-make
+make -j2
 ```
+
+For an installation whose tools are not on `PATH`, pass its binary and library
+directories explicitly. For example, with Rocq Platform 9.0 on macOS:
+
+```bash
+make -j2 \
+  COQBIN="/Applications/Rocq-Platform~9.0~2025.08.app/Contents/Resources/bin" \
+  ROCQLIB="/Applications/Rocq-Platform~9.0~2025.08.app/Contents/Resources/lib/coq"
+```
+
+Run `make clean` with the same optional path arguments to remove generated
+proof artifacts. GitHub Actions rebuilds the complete development with Rocq
+9.0 on every push and pull request.
 
 ---
 
@@ -54,6 +64,7 @@ All results are proved by `Qed` (no `Admitted`).
 | `tree_invariant_holds` | Parent pointers stay on real edges; no self-parent; initiator has no parent |
 | `children_are_neighbors_holds` | Children lists stay on real edges |
 | `valid_packets_holds` | Every in-flight packet travels along an existing edge |
+| `parent_in_all_nodes_holds` | Every parent pointer targets a node in `all_nodes` |
 | `active_non_init_parent_holds` | Non-initiator nodes in Active always have `ps_parent = Some _` (invariant) |
 | `non_init_not_decided_holds` | Non-initiator nodes never reach the Decided phase (invariant) |
 | `no_token_idle_decided` | At decision, no in-flight Token targets an Idle node |
@@ -98,6 +109,11 @@ startup rule also leaves a one-node network Active with pending count zero.
 
 For a guided explanation of the proof and its invariants, see
 [`PROOF_EXPLAINED.md`](PROOF_EXPLAINED.md).
+
+## Citation and license
+
+Release metadata is provided in [`CITATION.cff`](CITATION.cff). The source is
+available under the [MIT License](LICENSE).
 
 ---
 

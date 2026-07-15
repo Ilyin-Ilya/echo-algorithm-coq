@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use this artifact, please cite it using these metadata."
+title: "Echo Algorithm Decision-Time Correctness Proof in Rocq"
+type: software
+authors:
+  - given-names: Illia
+    family-names: Ilin
+    orcid: "https://orcid.org/0009-0001-2774-251X"
+  - given-names: Grygoriy
+    family-names: Zholtkevych
+    orcid: "https://orcid.org/0000-0002-7515-2143"
+repository-code: "https://github.com/Ilyin-Ilya/echo-algorithm-coq"
+url: "https://github.com/Ilyin-Ilya/echo-algorithm-coq/releases/tag/v1.0.0"
+version: 1.0.0
+date-released: 2026-07-15
+license: MIT
