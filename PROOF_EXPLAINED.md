@@ -151,7 +151,9 @@ D → B → I
 - Following parent pointers from any node eventually reaches the initiator.
 - The initiator's pending counter reached zero — it "knows" everyone has reported in.
 
-The proof shows this **always** happens, for **any** connected graph with **any** message ordering.
+The proof shows that these properties hold **whenever the initiator decides**,
+for any graph satisfying the stated hypotheses and every finite message-delivery
+order leading to that state.
 
 ---
 
@@ -162,22 +164,27 @@ The main theorem (`decided_reaches_initiator`) says:
 > **If** the initiator has decided (its phase is Decided), **then** every node in the
 > network has a chain of parent pointers leading back to the initiator.
 
-In other words: when the algorithm terminates, the spanning tree is complete and correct.
+In other words: whenever the initiator reaches `Decided`, the spanning structure
+is complete and correct.
 
 Two supporting theorems:
 
 - **`decided_implies_all_active`**: When the initiator decides, every non-initiator node
   is Active (it got activated and is part of the tree).
 
-- **`start_decreases_idle`**: Each execution step can only decrease the number of Idle
-  nodes — the wave always makes progress, never goes backward.
+- **`start_decreases_idle`**: The startup step changes the initiator from Idle to
+  Active and therefore decreases the number of listed Idle nodes by one.
 
 These are proved for **all** possible graphs satisfying:
 - The graph is undirected (`adj_sym`)
 - No self-loops (`adj_irrefl`)
-- There is a BFS-depth function (`wave_depth`) showing the initiator can reach everyone
+- There is a natural-valued depth certificate (`wave_depth`) showing that every
+  listed non-root node has a neighbor of smaller depth
 
-And for **all** possible message orderings (any interleaving of delivers).
+The conditional safety result covers **all finite message-delivery orders**. It
+does not prove that every execution reaches a decision: the scheduler may stop
+with packets still in flight, and the current startup rule does not decide on a
+one-node graph.
 
 ---
 
@@ -188,11 +195,12 @@ And for **all** possible message orderings (any interleaving of delivers).
 | Unit tests | Specific inputs on specific machines |
 | Simulation / model checking | All interleavings up to some bound |
 | Paper proof | Human-readable argument; can contain subtle errors |
-| **Formal proof (Rocq)** | **All inputs, all interleavings, all graph sizes, machine-verified** |
+| **Formal proof (Rocq)** | **The stated theorem for all parameter values and finite interleavings satisfying its hypotheses, machine-checked** |
 
-A formal proof is a **mathematical object** that a computer program (the Rocq kernel,
-~3000 lines of OCaml) verifies. If the kernel accepts it, the statement is true —
-period. There is no "it works on my machine" or "we only tested graphs up to 10 nodes."
+A formal proof is a **mathematical object** that the Rocq kernel checks. Kernel
+acceptance establishes the formal statement relative to its explicit
+parameters and to the correctness of the modeled semantics. There is no bound
+such as "we only tested graphs up to 10 nodes."
 
 The catch: the theorem is only as strong as its **assumptions** (see `Variable`
 declarations in the code). We do assume the graph is connected (via `wave_depth_props`)
@@ -286,11 +294,12 @@ This is the core correctness property, maintained from the very first step.
 ### Group B: Tokens are "promises" of future activation
 
 **`token_src_not_idle`**: Every Token in the message bag was sent by a non-Idle node.
-An Idle node never sends Tokens — so if a Token is in flight, its sender is Active.
+An Idle node never sends Tokens — so if a Token is in flight, its sender is non-Idle.
 
 **`token_sent_or_notidle`**: For every non-Idle node m and every adjacent node n (that
 isn't m's parent), either n is already non-Idle OR there's a Token from m to n in the
-bag. This is the invariant that shows the wave is always "making progress."
+bag. This records the alternatives needed for the later decision-time argument;
+by itself it is not an eventual-progress theorem.
 
 **`parent_is_active`**: Every node's parent is Active or Decided. You can only become
 someone's parent by sending them a Token, and you have to be non-Idle to send Tokens.
@@ -313,10 +322,9 @@ These are "obvious" things that are annoying but necessary to prove:
 bag whose destination is an Idle node.
 
 **Why this is hard to prove**: Suppose Token(m→n) is in the bag and n is Idle. Then n
-hasn't been activated yet. But if the initiator has decided, n must have echoed back at
-some point... but wait, n is Idle, so it can't have echoed. This is a contradiction —
-but proving it formally requires a careful argument about pending counts propagating up
-the parent chain (§6 below).
+hasn't been activated yet. The bag alone does not directly show why this conflicts with
+the initiator's decision. The proof connects the missing reply at n to a positive
+pending count at m and then carries that fact up m's parent chain (§6 below).
 
 **Why this matters**: It's needed to close the proof of `one_hop_active`. The Group B
 invariant says "n is not Idle OR there's a Token(m→n) in flight." When the initiator
@@ -325,12 +333,12 @@ be non-Idle — i.e., Active.
 
 ### Group E: The main theorems
 
-**`one_hop_active`**: If the initiator has decided and m is Active with m adjacent to n
-(and n is closer to the root than m in BFS order), then n is Active.
+**`one_hop_active`**: If the initiator has decided, m is non-Idle, m is adjacent
+to n, and m has smaller certificate depth than n, then n is Active.
 
-**`decided_implies_all_active`**: By induction on BFS depth: the initiator (depth 0) is
-Decided (non-Idle); by `one_hop_active`, every depth-1 node is Active; then every
-depth-2 node; and so on.
+**`decided_implies_all_active`**: By well-founded induction on the depth
+certificate, a smaller-depth neighbor is non-Idle and `one_hop_active` makes the
+current non-root node Active.
 
 **`decided_reaches_initiator`**: Every Active node has a parent chain to the initiator
 (Group A, TSC). So every node, now Active, has a parent chain to the initiator. ∎
@@ -346,10 +354,10 @@ This is the most non-obvious part of the proof, so it gets its own section.
 **Goal**: When the initiator decides, no Token is targeting an Idle node.
 
 **Why it's hard**: Suppose Token(m→n) is in the bag and n is Idle. We need a
-contradiction. n is Idle means n never got any Token, so n never activated, and never
-sent any Echo. But if the initiator decided, its pending counter reached 0, meaning it
-received all the Echoes it was waiting for. How can it have received all Echoes if
-someone in its subtree (the part of the tree that passes through m and n) never echoed?
+contradiction. n is Idle means n never got any Token, so n never activated and never
+sent any Echo. The difficulty is to connect that outstanding Token to the initiator's
+local counter: n has not yet joined the parent tree. The proof uses m's parent chain to
+propagate a positive pending count back to the initiator.
 
 ### The formal argument
 
@@ -510,13 +518,14 @@ explanations. The proofs are short given the invariants.
 ### The mega-step lemma
 
 **`token_echo_accounting_step`** (lines ~5343–5997, ~650 lines): The longest proof in
-the file. It proves 6 sub-invariants simultaneously (they need each other). You don't
-need to read it all — just read the docstring explaining why they're combined, and look
-at one case (e.g., the Token/Active case at ~line 5575) to see the pattern.
+the file. It proves six new accounting clauses simultaneously while carrying the
+supporting invariant bundle (19 components in `token_echo_accounting`). You don't need
+to read it all — just read the docstring explaining why they're combined, and look at
+one case (e.g., the Token/Active case at ~line 5575) to see the pattern.
 
 ### The concrete example
 
-**`theories/Example.v`**: A specific 3-node triangle graph where the algorithm is
+**`theories/Example.v`**: A specific 3-node line graph where the algorithm is
 verified by computation (no `Variable` parameters — actual node names). Good for
 intuition.
 
@@ -524,8 +533,9 @@ intuition.
 
 ## Summary
 
-The proof establishes that the Echo algorithm is correct on **any** connected undirected
-graph, for **any** message ordering. The key steps:
+The proof establishes decision-time safety for any finite undirected graph with
+the stated connectivity certificate, across every finite message ordering. It
+does not establish eventual decision. The key steps:
 
 1. Invariants about tree shape (Group A) are proved by simple induction.
 2. Invariants about the wave propagation (Group B) are proved using A.
@@ -537,4 +547,4 @@ graph, for **any** message ordering. The key steps:
    is complete.
 
 Total proof size: ~7000 lines of Rocq for a ~300-line algorithm definition.  
-Every `Qed` is machine-verified. No `Admitted`. No gaps.
+Every `Qed` is machine-checked. There are no admitted proof obligations.

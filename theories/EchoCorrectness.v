@@ -1078,9 +1078,9 @@ Qed.
 (* ================================================================== *)
 (** ** 8. Spanning tree (path to initiator) *)
 
-(** Follow the ps_parent chain for at most k hops.
-    Returns Some m if the chain reaches m in ≤ k steps, None if it runs
-    into a node with no parent before k steps are used.  The bound k is
+(** Attempt to follow exactly k ps_parent links.
+    Returns Some m if all k links exist, or None if the chain runs into a
+    node with no parent before k steps are used.  The bound k is
     existentially quantified in [reaches_initiator], so the caller need
     only exhibit a concrete k — typically the depth of n in the token-wave
     spanning tree. *)
@@ -1579,7 +1579,7 @@ Definition initiator_decided (gs : EState) : Prop :=
   (proc_of gs initiator).(ps_phase) = Decided.
 
 (* ================================================================== *)
-(** * Group B — Token propagation: why every node eventually activates
+(** * Group B — Token propagation: why every node is active at decision
 
     Three invariants jointly prove [one_hop_active]: if the initiator has
     decided and m is Active with adj m n (m closer to the root), then n
@@ -6853,13 +6853,13 @@ Qed.
 (** * Group E — Main theorems
 
     [one_hop_active]:            Groups B + D ⟹ Active m adj n ⟹ Active n.
-    [decided_implies_all_active]: Induction on [wave_depth] (BFS connectivity).
+    [decided_implies_all_active]: Induction on [wave_depth] (connectivity certificate).
     [decided_reaches_initiator]:  A + TSC ⟹ spanning tree complete. *)
 (* ================================================================== *)
 
-(** BFS spanning tree rooted at [initiator].
-    [wave_depth n] is the depth of n in the BFS tree; every non-initiator has
-    at least one neighbor of strictly smaller depth (graph connectivity property). *)
+(** Connectivity certificate rooted at [initiator].
+    [wave_depth n] is a natural-valued rank; every listed non-initiator has
+    at least one listed neighbor of strictly smaller rank. *)
 Variable wave_depth : node -> nat.
 (** Combined connectivity assumptions: initiator is at depth 0, and every
     other node has a neighbor strictly closer to the root. *)
@@ -6959,7 +6959,7 @@ Proof.
   exact (one_hop_active gs Hr Hdec m n Hmin Hn (adj_sym n m Hadj) Hlt Hm_not_idle).
 Qed.
 
-(** Main liveness theorem: when the initiator decides, the spanning tree
+(** Main decision-time safety theorem: when the initiator decides, the spanning tree
     is complete — every node in the network has a chain of ps_parent
     pointers leading back to the initiator.
 
