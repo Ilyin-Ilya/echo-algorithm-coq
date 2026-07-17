@@ -41,9 +41,26 @@ proof artifacts. GitHub Actions rebuilds the complete development with Rocq
 |------|-------------|
 | `theories/LTS.v` | Generic labeled transition system framework (reachability, invariants, composition) |
 | `theories/Network.v` | Generic asynchronous message-passing network model |
-| `theories/EchoAlgorithm.v` | Echo algorithm state machine and global LTS |
-| `theories/EchoCorrectness.v` | Safety and spanning-tree correctness proofs |
-| `theories/Example.v` | Concrete 3-node execution |
+| `theories/EchoAlgorithm.v` | Echo state machine, `ECHO_CONFIG`, and the `MakeEcho` model functor |
+| `theories/EchoCorrectness.v` | `ECHO_CORRECTNESS_CONFIG` and the parameterized correctness functor |
+| `theories/Example.v` | Concrete 3-node configuration, model, proof instance, and execution |
+
+---
+
+## Module architecture
+
+`ECHO_CONFIG` specifies the node type, decidable equality, initiator, finite
+node list, and adjacency function needed by the algorithm. `MakeEcho(C)` turns
+any implementation of that signature into a namespaced transition system.
+
+`ECHO_CORRECTNESS_CONFIG` extends the algorithm signature with symmetry,
+irreflexivity, initiator-membership, and no-duplicate obligations.
+`MakeEchoCorrectness(C)` checks these obligations once and supplies the complete
+invariant and correctness library for that configuration. `Example.v`
+demonstrates both functors with `Line3Config`.
+
+The generic transition-system framework remains a `Record`, allowing an LTS to
+be passed to ordinary definitions such as `reachable` and `is_invariant`.
 
 ---
 
@@ -77,9 +94,10 @@ All results are proved by `Qed` (no `Admitted`).
 ## Parameters and assumptions
 
 The development contains no `Axiom`, `Admitted`, or `admit`. Running
-`Print Assumptions decided_reaches_initiator` reports `Closed under the global
-context`. The theorem is parameterized by the following data and hypotheses,
-all declared as `Variable` in `EchoCorrectness.v`.
+`Print Assumptions Echo3Correctness.decided_reaches_initiator` reports `Closed
+under the global context`. The algorithm data and graph obligations are fields
+of the module signatures; the connectivity certificate remains an explicit
+parameter of the two decision-time theorems.
 
 | Parameter or hypothesis | Meaning |
 |-------------------------|---------|

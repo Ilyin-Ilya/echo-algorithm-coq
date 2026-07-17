@@ -21,7 +21,23 @@ Import ListNotations.
 Require Import LTS.
 
 (* ------------------------------------------------------------------ *)
-(** ** 1. Abstract node type
+(** ** 1. Algorithm configuration interface
+
+    [ECHO_CONFIG] packages the data needed to instantiate the executable
+    transition system.  Graph laws are deliberately absent: the algorithm can
+    run on any finite adjacency structure, while the correctness development
+    states its additional assumptions in a stronger module type. *)
+
+Module Type ECHO_CONFIG.
+  Parameter node : Type.
+  Parameter node_eq : forall (n m : node), {n = m} + {n <> m}.
+  Parameter initiator : node.
+  Parameter all_nodes : list node.
+  Parameter adj : node -> node -> bool.
+End ECHO_CONFIG.
+
+(* ------------------------------------------------------------------ *)
+(** ** 2. Abstract node type
 
     We leave the node type abstract and only require decidable equality
     and a finite list of all nodes. *)
@@ -304,3 +320,29 @@ Arguments initiator_start {node} node_eq.
 Arguments handle_msg      {node} node_eq.
 Arguments echo_init       {node}.
 Arguments echo_step       {node node_eq initiator all_nodes adj}.
+
+(* ------------------------------------------------------------------ *)
+(** ** Module-level algorithm instance
+
+    The core definitions above remain polymorphic Rocq terms.  [MakeEcho]
+    supplies those terms through one namespace after checking that its
+    argument provides every field of [ECHO_CONFIG]. *)
+
+Module MakeEcho (C : ECHO_CONFIG).
+  Definition State : Type := @echo_state C.node.
+  Definition Packet : Type := @echo_packet C.node.
+  Definition Label : Type := @echo_label C.node.
+
+  Definition initial_process : @proc_state C.node := @initial_proc C.node.
+  Definition init : State -> Prop := @echo_init C.node.
+  Definition start : State -> State :=
+    @initiator_start C.node C.node_eq C.initiator C.all_nodes C.adj.
+  Definition deliver : C.node -> State -> Packet -> State :=
+    @handle_msg C.node C.node_eq C.all_nodes C.adj.
+  Definition remove : Packet -> list Packet -> list Packet :=
+    @remove_pkt C.node C.node_eq.
+  Definition step : State -> Label -> State -> Prop :=
+    @echo_step C.node C.node_eq C.initiator C.all_nodes C.adj.
+  Definition lts : LTS :=
+    @echo_LTS C.node C.node_eq C.initiator C.all_nodes C.adj.
+End MakeEcho.

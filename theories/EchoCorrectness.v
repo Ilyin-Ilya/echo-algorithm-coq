@@ -26,28 +26,32 @@ Import ListNotations.
 Require Import LTS.
 Require Import EchoAlgorithm.
 
+Module Type ECHO_CORRECTNESS_CONFIG.
+  Include ECHO_CONFIG.
+
+  Parameter adj_sym : forall n m, adj n m = true -> adj m n = true.
+  Parameter adj_irrefl : forall n, adj n n = false.
+  Parameter initiator_in_nodes : In initiator all_nodes.
+  Parameter nodup_nodes : NoDup all_nodes.
+End ECHO_CORRECTNESS_CONFIG.
+
+(** Correctness is a functor: every module that supplies the algorithm data
+    and proves the graph obligations receives the complete invariant library. *)
+Module MakeEchoCorrectness (C : ECHO_CORRECTNESS_CONFIG).
+
 Section EchoCorrectness.
 
-(** Abstract node type — the proof is generic over any type with decidable equality. *)
-Variable node      : Type.
-(** Decidable equality on nodes, needed for update_proc and remove_pkt. *)
-Variable node_eq   : forall (n m : node), {n = m} + {n <> m}.
-(** The unique initiator: the only node permitted to fire [step_start]. *)
-Variable initiator : node.
-(** A finite enumeration of all nodes, used for pending counts and idle_count. *)
-Variable all_nodes : list node.
-(** Symmetric adjacency relation; [adj u v = true] iff there is an edge u-v. *)
-Variable adj       : node -> node -> bool.
-
-(** Graph assumptions required for correctness. *)
-Variable adj_sym    : forall n m, adj n m = true -> adj m n = true.
-Variable adj_irrefl : forall n,   adj n n = false.
-
-(** A2. Bookkeeping assumptions on [all_nodes].
-    [initiator ∈ all_nodes] is needed so idle_count counts the initiator.
-    [NoDup all_nodes] ensures filter / length arithmetic is exact. *)
-Variable initiator_in_nodes : In initiator all_nodes.
-Variable nodup_nodes        : NoDup all_nodes.
+(** Short local names keep the proof statements close to their mathematical
+    presentation while every parameter is supplied by the checked module [C]. *)
+Local Notation node := C.node.
+Local Notation node_eq := C.node_eq.
+Local Notation initiator := C.initiator.
+Local Notation all_nodes := C.all_nodes.
+Local Notation adj := C.adj.
+Local Notation adj_sym := C.adj_sym.
+Local Notation adj_irrefl := C.adj_irrefl.
+Local Notation initiator_in_nodes := C.initiator_in_nodes.
+Local Notation nodup_nodes := C.nodup_nodes.
 
 (** Why this helps [start_decreases_idle]:
     idle_count is [length (filter Idle all_nodes)].  With NoDup and
@@ -7081,3 +7085,5 @@ Proof.
 Qed.
 
 End EchoCorrectness.
+
+End MakeEchoCorrectness.
