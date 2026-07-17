@@ -5,47 +5,79 @@
 
     We execute the echo algorithm step-by-step and verify the final state.
 
-    Function signatures after section closure:
-      echo_init      : node -> echo_state -> Prop
-      initiator_start: node -> node_eq -> initiator -> all_nodes -> adj -> echo_state -> echo_state
-      handle_msg     : node -> node_eq -> all_nodes -> adj -> self -> echo_state -> pkt -> echo_state
-      remove_pkt     : node -> node_eq -> pkt -> list pkt -> list pkt  *)
+    [Line3Config] implements the correctness configuration signature.
+    [Echo3] and [Echo3Correctness] are the resulting model and proof modules. *)
 
 From Stdlib Require Import List.
 From Stdlib Require Import Arith.
 Import ListNotations.
 Require Import LTS.
 Require Import EchoAlgorithm.
+Require Import EchoCorrectness.
 
 (* ------------------------------------------------------------------ *)
-(** ** 1. Concrete node type *)
+(** ** 1. Concrete correctness configuration *)
 
-Definition node3_eq : forall (n m : nat), {n = m} + {n <> m} := Nat.eq_dec.
+Module Line3Config <: ECHO_CORRECTNESS_CONFIG.
+  Definition node := nat.
+  Definition node_eq : forall (n m : node), {n = m} + {n <> m} := Nat.eq_dec.
 
-Definition line3_adj (u v : nat) : bool :=
-  match u, v with
-  | 0, 1 | 1, 0 => true
-  | 1, 2 | 2, 1 => true
-  | _, _         => false
-  end.
+  Definition adj (u v : node) : bool :=
+    match u, v with
+    | 0, 1 | 1, 0 => true
+    | 1, 2 | 2, 1 => true
+    | _, _         => false
+    end.
 
-Definition nodes3 : list nat := [0; 1; 2].
-Definition init0  : nat := 0.
+  Definition all_nodes : list node := [0; 1; 2].
+  Definition initiator : node := 0.
+
+  Lemma adj_sym : forall n m, adj n m = true -> adj m n = true.
+  Proof.
+    intros [|[|[|n]]] [|[|[|m]]]; simpl; intros H;
+      try discriminate; reflexivity.
+  Qed.
+
+  Lemma adj_irrefl : forall n, adj n n = false.
+  Proof. intros [|[|[|n]]]; reflexivity. Qed.
+
+  Lemma initiator_in_nodes : In initiator all_nodes.
+  Proof. simpl; auto. Qed.
+
+  Lemma nodup_nodes : NoDup all_nodes.
+  Proof.
+    constructor.
+    - simpl; intuition congruence.
+    - constructor.
+      + simpl; intuition congruence.
+      + constructor.
+        * simpl; intuition congruence.
+        * constructor.
+  Qed.
+End Line3Config.
+
+(** Compatibility names used in the calculations below. *)
+Definition node3_eq := Line3Config.node_eq.
+Definition line3_adj := Line3Config.adj.
+Definition nodes3 := Line3Config.all_nodes.
+Definition init0 := Line3Config.initiator.
 
 (* ------------------------------------------------------------------ *)
-(** ** 2. Instantiate the LTS *)
+(** ** 2. Instantiate the model and its correctness library *)
 
-Definition echo3_LTS : LTS :=
-  echo_LTS nat node3_eq init0 nodes3 line3_adj.
+Module Echo3 := MakeEcho Line3Config.
+Module Echo3Correctness := MakeEchoCorrectness Line3Config.
+
+Definition echo3_LTS : LTS := Echo3.lts.
 
 (* ------------------------------------------------------------------ *)
 (** ** 3. Build the initial state *)
 
-Definition start_state : @echo_state nat :=
-  mkEchoState (fun _ => @initial_proc nat) [].
+Definition start_state : Echo3.State :=
+  mkEchoState (fun _ => Echo3.initial_process) [].
 
 (** The initial state satisfies [echo_init]. *)
-Lemma start_is_initial : echo_init start_state.
+Lemma start_is_initial : Echo3.init start_state.
 Proof.
   split.
   - intros n. reflexivity.
@@ -57,7 +89,7 @@ Qed.
 
 (** Step 1: initiator fires — node 0 becomes Active, sends Token to node 1. *)
 Definition after_start :=
-  initiator_start node3_eq init0 nodes3 line3_adj start_state.
+  Echo3.start start_state.
 
 Lemma after_start_initiator_active :
   (after_start.(es_procs) 0).(ps_phase) = Active.
@@ -76,11 +108,11 @@ Proof. vm_compute. left. reflexivity. Qed.
 Definition pkt_01_tok : @echo_packet nat := mkPkt 0 1 Token.
 
 Definition after_deliver_01 :=
-  handle_msg node3_eq nodes3 line3_adj
+  Echo3.deliver
     1
     (mkEchoState
        after_start.(es_procs)
-       (remove_pkt node3_eq pkt_01_tok after_start.(es_msgs)))
+       (Echo3.remove pkt_01_tok after_start.(es_msgs)))
     pkt_01_tok.
 
 Lemma node1_active :
@@ -99,11 +131,11 @@ Proof. vm_compute. left. reflexivity. Qed.
 Definition pkt_12_tok : @echo_packet nat := mkPkt 1 2 Token.
 
 Definition after_deliver_12 :=
-  handle_msg node3_eq nodes3 line3_adj
+  Echo3.deliver
     2
     (mkEchoState
        after_deliver_01.(es_procs)
-       (remove_pkt node3_eq pkt_12_tok after_deliver_01.(es_msgs)))
+       (Echo3.remove pkt_12_tok after_deliver_01.(es_msgs)))
     pkt_12_tok.
 
 Lemma node2_active :
@@ -118,11 +150,11 @@ Proof. reflexivity. Qed.
 Definition pkt_21_echo : @echo_packet nat := mkPkt 2 1 Echo.
 
 Definition after_echo_21 :=
-  handle_msg node3_eq nodes3 line3_adj
+  Echo3.deliver
     1
     (mkEchoState
        after_deliver_12.(es_procs)
-       (remove_pkt node3_eq pkt_21_echo after_deliver_12.(es_msgs)))
+       (Echo3.remove pkt_21_echo after_deliver_12.(es_msgs)))
     pkt_21_echo.
 
 Lemma node1_echoes_back :
@@ -133,11 +165,11 @@ Proof. vm_compute. left. reflexivity. Qed.
 Definition pkt_10_echo : @echo_packet nat := mkPkt 1 0 Echo.
 
 Definition after_echo_10 :=
-  handle_msg node3_eq nodes3 line3_adj
+  Echo3.deliver
     0
     (mkEchoState
        after_echo_21.(es_procs)
-       (remove_pkt node3_eq pkt_10_echo after_echo_21.(es_msgs)))
+       (Echo3.remove pkt_10_echo after_echo_21.(es_msgs)))
     pkt_10_echo.
 
 (** The initiator decides — algorithm terminates. *)

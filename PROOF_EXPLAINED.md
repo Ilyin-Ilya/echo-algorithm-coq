@@ -202,8 +202,8 @@ acceptance establishes the formal statement relative to its explicit
 parameters and to the correctness of the modeled semantics. There is no bound
 such as "we only tested graphs up to 10 nodes."
 
-The catch: the theorem is only as strong as its **assumptions** (see `Variable`
-declarations in the code). We do assume the graph is connected (via `wave_depth_props`)
+The catch: the theorem is only as strong as its **assumptions** (see the
+`ECHO_CORRECTNESS_CONFIG` fields and `wave_depth_props` in the code). We do assume the graph is connected (via `wave_depth_props`)
 and that the system model is accurate (a global bag of in-flight packets, any order of
 delivery). Those assumptions are clearly stated and reasonable.
 
@@ -406,8 +406,9 @@ is a short glossary for reading `EchoCorrectness.v`.
 
 | Rocq syntax | Plain English |
 |-------------|---------------|
-| `Variable node : Type.` | Abstract type parameter — "node" is some type, we don't know which |
-| `Variable adj : node -> node -> bool.` | Abstract function: adjacency predicate |
+| `Module Type ECHO_CONFIG.` | Begin an interface describing the data required by the algorithm |
+| `Parameter node : Type.` | Required abstract node type supplied by a configuration module |
+| `Module MakeEcho (C : ECHO_CONFIG).` | Build a model module from any checked configuration |
 | `Definition proc_of gs n := gs.(es_procs) n.` | Helper function: look up node n's state |
 | `Inductive phase := Idle \| Active \| Decided.` | Enumeration of three values |
 | `Record proc_state := mkProc { ps_phase : phase; ps_parent : option node; ... }.` | A struct with named fields |
@@ -483,9 +484,10 @@ Here is a reading order from simplest to most complex.
 
 ### Start here
 
-**`theories/EchoAlgorithm.v`** (306 lines)
+**`theories/EchoAlgorithm.v`**
 - The algorithm itself: `handle_msg` (lines 133–204) is the heart. Read this first.
 - Each case of the `match` is one message-handling rule.
+- `ECHO_CONFIG` and `MakeEcho` package a concrete algorithm instance.
 
 **`theories/LTS.v`** (~100 lines)
 - The generic framework: what `is_invariant`, `reachable`, and `invariant_by_induction`
@@ -494,7 +496,8 @@ Here is a reading order from simplest to most complex.
 ### Understand the model
 
 **`theories/EchoCorrectness.v`, lines 1–190**
-- Section variables: what the proof is parameterized over.
+- `ECHO_CORRECTNESS_CONFIG`: the graph obligations required by the proofs.
+- `MakeEchoCorrectness`: the functor that constructs the proof library.
 - Definitions of `proc_of`, `INV`, `TSC`, `parent_is_neighbor`, etc.
 - Helper lemmas about `update_proc` (lines 81–107): these are the "CRUD" of the proof —
   reading back what you just wrote, not writing what you didn't.
@@ -526,7 +529,8 @@ one case (e.g., the Token/Active case at ~line 5575) to see the pattern.
 ### The concrete example
 
 **`theories/Example.v`**: A specific 3-node line graph where the algorithm is
-verified by computation (no `Variable` parameters — actual node names). Good for
+verified by computation. `Line3Config` discharges the module obligations with
+actual node names, and the two functors instantiate the model and proofs. Good for
 intuition.
 
 ---
